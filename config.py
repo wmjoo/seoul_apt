@@ -2,21 +2,46 @@
 설정 파일
 API 키는 .env 파일에 저장하세요. (보안상 권장)
 또는 환경변수로 설정하거나, 아래에 직접 입력할 수 있습니다.
+Streamlit Cloud에서는 Secrets를 사용할 수 있습니다.
 """
 import os
 from dotenv import load_dotenv
 
+# Streamlit Secrets 지원 (Streamlit Cloud용)
+try:
+    import streamlit as st
+    USE_STREAMLIT_SECRETS = True
+except ImportError:
+    USE_STREAMLIT_SECRETS = False
+
 # .env 파일 로드
 load_dotenv()
 
+def get_secret(key: str, default: str = None) -> str:
+    """Secrets 또는 환경변수에서 값을 가져옵니다.
+    우선순위: Streamlit Secrets > 환경변수 > .env 파일 > 기본값
+    """
+    # Streamlit Secrets 확인
+    if USE_STREAMLIT_SECRETS:
+        try:
+            if hasattr(st, 'secrets') and key in st.secrets:
+                return st.secrets[key]
+        except:
+            pass
+    
+    # 환경변수 확인
+    value = os.getenv(key)
+    if value:
+        return value
+    
+    # 기본값 반환
+    return default
+
 # 공공데이터포털 API 키 (https://www.data.go.kr 에서 발급)
-# 우선순위: 환경변수 > .env 파일 > 하드코딩된 값
-PUBLIC_DATA_API_KEY = os.getenv("PUBLIC_DATA_API_KEY", "YOUR_PUBLIC_DATA_API_KEY")
+PUBLIC_DATA_API_KEY = get_secret("PUBLIC_DATA_API_KEY", "YOUR_PUBLIC_DATA_API_KEY")
 
 # 서울 열린데이터광장 API 키 (https://data.seoul.go.kr 에서 발급)
-# 우선순위: 환경변수 > .env 파일 > 하드코딩된 값
-# .env 파일에 "SEOUL_DATA_API_KEY=your_api_key_here" 형식으로 추가하세요
-SEOUL_DATA_API_KEY = os.getenv("SEOUL_DATA_API_KEY", "YOUR_SEOUL_API_KEY_HERE")
+SEOUL_DATA_API_KEY = get_secret("SEOUL_DATA_API_KEY", "YOUR_SEOUL_API_KEY_HERE")
 
 # 서울 열린데이터광장 데이터셋 ID
 SEOUL_REAL_ESTATE_DATASET_ID = "OA-21275"  # 부동산 실거래가
