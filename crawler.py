@@ -573,9 +573,9 @@ class SeoulApartmentCrawler:
             except:
                 hh_135sqm = None
             
-            # 원본 데이터를 최대한 보존하면서 필요한 파생변수만 추가
+            # 원본 데이터를 모두 보존하면서 필요한 파생변수만 추가
             apartment = {
-                # 기본 정보
+                # === 파생/변환된 컬럼 (앱에서 사용하기 편한 형식) ===
                 "자치구": district,
                 "주소": address,
                 "아파트명": apt_name,
@@ -610,12 +610,55 @@ class SeoulApartmentCrawler:
                 "난방방식": heating_method,
                 "홈페이지": homepage,
                 
-                # 원본 데이터 보존 (필요시 사용)
+                # === 원본 API 응답 컬럼 모두 보존 ===
+                "원본_SN": row.get('SN', None),
                 "원본_APT_CD": row.get('APT_CD', ''),
+                "원본_APT_NM": row.get('APT_NM', ''),
+                "원본_CMPX_CLSF": row.get('CMPX_CLSF', ''),  # 단지분류
+                "원본_APT_STDG_ADDR": row.get('APT_STDG_ADDR', ''),  # 지번주소
+                "원본_APT_RDN_ADDR": row.get('APT_RDN_ADDR', ''),  # 도로명주소
+                "원본_CTPV_ADDR": row.get('CTPV_ADDR', ''),  # 시도주소
+                "원본_SGG_ADDR": row.get('SGG_ADDR', ''),  # 시군구주소
+                "원본_EMD_ADDR": row.get('EMD_ADDR', ''),  # 읍면동주소
+                "원본_DADDR": row.get('DADDR', ''),  # 상세주소
+                "원본_RDN_ADDR": row.get('RDN_ADDR', ''),  # 도로명
+                "원본_ROAD_DADDR": row.get('ROAD_DADDR', ''),  # 도로명상세주소
                 "원본_TELNO": row.get('TELNO', ''),
-                "원본_GFA": row.get('GFA', None),  # 연면적
-                "원본_MNCO_LEVY_AREA": row.get('MNCO_LEVY_AREA', None),  # 관리비부과면적
+                "원본_FXNO": row.get('FXNO', ''),  # 팩스번호
+                "원본_APT_CMPX": row.get('APT_CMPX', ''),  # 아파트단지
+                "원본_APT_ATCH_FILE": row.get('APT_ATCH_FILE', ''),  # 첨부파일
+                "원본_HH_TYPE": row.get('HH_TYPE', ''),  # 세대유형
+                "원본_MNG_MTHD": row.get('MNG_MTHD', ''),  # 관리방법
+                "원본_ROAD_TYPE": row.get('ROAD_TYPE', ''),  # 복도유형
+                "원본_MN_MTHD": row.get('MN_MTHD', ''),  # 난방방식
                 "원본_WHOL_DONG_CNT": row.get('WHOL_DONG_CNT', None),  # 전체동수
+                "원본_TNOHSH": row.get('TNOHSH', None),  # 전체세대수
+                "원본_BLDR": row.get('BLDR', ''),  # 건설사
+                "원본_DVLR": row.get('DVLR', ''),  # 시행사
+                "원본_USE_APRV_YMD": row.get('USE_APRV_YMD', ''),  # 사용승인일
+                "원본_GFA": row.get('GFA', None),  # 연면적
+                "원본_RSDT_XUAR": row.get('RSDT_XUAR', None),  # 주거전용면적
+                "원본_MNCO_LEVY_AREA": row.get('MNCO_LEVY_AREA', None),  # 관리비부과면적
+                "원본_XUAR_HH_STTS60": row.get('XUAR_HH_STTS60', None),  # 전용면적별세대현황(60㎡이하)
+                "원본_XUAR_HH_STTS85": row.get('XUAR_HH_STTS85', None),  # 전용면적별세대현황(60㎡~85㎡이하)
+                "원본_XUAR_HH_STTS135": row.get('XUAR_HH_STTS135', None),  # 85㎡~135㎡이하
+                "원본_XUAR_HH_STTS136": row.get('XUAR_HH_STTS136', None),  # 135㎡초과
+                "원본_HMPG": row.get('HMPG', ''),  # 홈페이지
+                "원본_REG_YMD": row.get('REG_YMD', ''),  # 등록일자
+                "원본_MDFCN_YMD": row.get('MDFCN_YMD', ''),  # 수정일자
+                "원본_EPIS_MNG_NO": row.get('EPIS_MNG_NO', ''),  # 에피소드관리번호
+                "원본_EPS_MNG_FORM": row.get('EPS_MNG_FORM', ''),  # 에피소드관리형태
+                "원본_HH_ELCT_CTRT_MTHD": row.get('HH_ELCT_CTRT_MTHD', ''),  # 세대전기계약방법
+                "원본_CLNG_MNG_FORM": row.get('CLNG_MNG_FORM', ''),  # 냉방관리형태
+                "원본_BDAR": row.get('BDAR', None),  # 건물면적
+                "원본_PRK_CNTOM": row.get('PRK_CNTOM', None),  # 주차대수
+                "원본_SE_CD": row.get('SE_CD', ''),  # 시설코드
+                "원본_CMPX_APRV_DAY": row.get('CMPX_APRV_DAY', ''),  # 단지승인일
+                "원본_USE_YN": row.get('USE_YN', ''),  # 사용여부
+                "원본_MNCO_ULD_YN": row.get('MNCO_ULD_YN', ''),  # 관리사무소유무
+                "원본_XCRD": row.get('XCRD', ''),  # 경도
+                "원본_YCRD": row.get('YCRD', ''),  # 위도
+                "원본_CMPX_APLD_DAY": row.get('CMPX_APLD_DAY', ''),  # 단지적용일
             }
             
             processed_data.append(apartment)

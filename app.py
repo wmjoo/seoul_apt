@@ -19,8 +19,8 @@ st.set_page_config(
 )
 
 # 제목
-st.title("🏢 서울 아파트 검색 시스템")
-st.markdown("---")
+# st.title("🏢 서울 아파트 검색 시스템")
+# st.markdown("---")
 
 # 데이터 로드 함수
 @st.cache_data
@@ -31,22 +31,60 @@ def load_data():
     # 우선순위: 메타데이터 > 일반 데이터 > 샘플 데이터
     if os.path.exists("seoul_apartments_metadata.csv"):
         df = crawler.load_from_csv("seoul_apartments_metadata.csv")
-        st.toast(f"✅ 실제 아파트 메타데이터 로드 완료 ({len(df)}건)", icon="✅")
+        data_type = "metadata"
     elif os.path.exists("seoul_apartments.csv"):
         df = crawler.load_from_csv("seoul_apartments.csv")
         # 샘플 데이터인지 확인 (아파트명 컬럼이 없으면 샘플)
         if "아파트명" not in df.columns:
-            st.toast("⚠️ 샘플 데이터를 사용 중입니다.", icon="⚠️")
+            data_type = "sample"
+        else:
+            data_type = "normal"
     else:
-        st.toast("데이터 파일이 없습니다. 샘플 데이터를 생성합니다...", icon="ℹ️")
         df = crawler.generate_sample_data(num_samples=500)
         crawler.save_to_csv(df, "seoul_apartments.csv")
+        data_type = "generated"
     
-    return df
+    # 동 정보 추가 (신규 데이터 기준: 원본_EMD_ADDR 사용, 없으면 주소에서 추출)
+    if "동" not in df.columns:
+        if "원본_EMD_ADDR" in df.columns:
+            # 원본_EMD_ADDR에서 동 정보 추출 (예: "흑석동" -> 그대로 사용)
+            df["동"] = df["원본_EMD_ADDR"].apply(
+                lambda x: str(x).strip() if pd.notna(x) and str(x).strip() and str(x).strip() != 'nan' else None
+            )
+        else:
+            # 원본 컬럼이 없으면 주소에서 추출
+            df["동"] = df["주소"].apply(extract_dong)
+    
+    # '임대'가 포함된 아파트명 행 제외
+    if "아파트명" in df.columns:
+        df = df[~df["아파트명"].astype(str).str.contains("임대", na=False)]
+    
+    # 오피스텔 및 주상복합 제외 (원본_CMPX_CLSF 컬럼 사용)
+    if "원본_CMPX_CLSF" in df.columns:
+        # "아파트"만 남기고 나머지(주상복합, 연립주택, 도시형 생활주택 등) 제외
+        df = df[df["원본_CMPX_CLSF"].astype(str).str.contains("아파트", na=False)]
+    
+    # 아파트명에 "오피스텔"이 포함된 경우도 제외
+    if "아파트명" in df.columns:
+        df = df[~df["아파트명"].astype(str).str.contains("오피스텔", na=False, case=False)]
+    
+    # '답십리1동'을 '답십리동'으로 예외처리
+    if "동" in df.columns:
+        df["동"] = df["동"].replace("답십리1동", "답십리동")
+    
+    return df, data_type, len(df)
 
 
 # 데이터 로드
-df = load_data()
+df, data_type, data_count = load_data()
+
+# 데이터 로드 메시지 표시 (캐시 함수 밖에서)
+if data_type == "metadata":
+    st.toast(f"실제 아파트 메타데이터 로드 완료 ({data_count}건)", icon="✅")
+elif data_type == "sample":
+    st.toast("샘플 데이터를 사용 중입니다.", icon="⚠️")
+elif data_type == "generated":
+    st.toast("데이터 파일이 없습니다. 샘플 데이터를 생성합니다...", icon="ℹ️")
 
 # 동 정보 추가 (없으면 생성)
 if "동" not in df.columns:
@@ -55,25 +93,39 @@ if "동" not in df.columns:
 # 사이드바 필터
 st.sidebar.header("🔍 검색 필터")
 
-# 자치구 필터
-districts_list = df["자치구"].dropna().unique().tolist()
-districts = ["전체"] + sorted([str(x) for x in districts_list if pd.notna(x) and str(x).strip()])
-# 기본값을 동대문구로 설정 (동대문구가 있으면)
-default_district = "동대문구" if "동대문구" in districts else "전체"
-selected_district = st.sidebar.selectbox("자치구", districts, index=districts.index(default_district) if default_district in districts else 0)
+# 초기화 버튼 (자치구 제외하고 모든 필터 초기화)
+if st.sidebar.button("🔄 필터 초기화", use_container_width=True):
+    # 필터 관련 session_state 키들 초기화 (자치구 제외)
+    filter_keys = ['dong', 'year_range', 'household', 'hallway', 'distance', 'subway']
+    for key in filter_keys:
+        if key in st.session_state:
+            del st.session_state[key]
+    st.rerun()
 
-# 동 필터 (자치구 선택 시 해당 자치구의 동만 표시)
-if selected_district != "전체":
-    district_df = df[df["자치구"] == selected_district]
-    dong_list = district_df["동"].dropna().unique().tolist()
-    dongs = ["전체"] + sorted([str(x) for x in dong_list if pd.notna(x) and str(x).strip()])
-else:
-    dong_list = df["동"].dropna().unique().tolist()
-    dongs = ["전체"] + sorted([str(x) for x in dong_list if pd.notna(x) and str(x).strip()])
+# 자치구와 동 필터 (병렬 배치)
+col_district, col_dong = st.sidebar.columns(2)
 
-selected_dong = st.sidebar.selectbox("동", dongs)
+with col_district:
+    districts_list = df["자치구"].dropna().unique().tolist()
+    districts = ["전체"] + sorted([str(x) for x in districts_list if pd.notna(x) and str(x).strip()])
+    # 기본값을 동대문구로 설정 (동대문구가 있으면)
+    default_district = "동대문구" if "동대문구" in districts else "전체"
+    selected_district = st.selectbox("자치구", districts, index=districts.index(default_district) if default_district in districts else 0)
 
-# 필터링된 데이터 기준으로 슬라이더 범위 계산
+with col_dong:
+    # 동 필터 (자치구 선택 시 해당 자치구의 동만 표시) - 동적 갱신
+    if selected_district != "전체":
+        district_df = df[df["자치구"] == selected_district]
+        dong_list = district_df["동"].dropna().unique().tolist()
+        dongs = ["전체"] + sorted([str(x) for x in dong_list if pd.notna(x) and str(x).strip()])
+    else:
+        dong_list = df["동"].dropna().unique().tolist()
+        dongs = ["전체"] + sorted([str(x) for x in dong_list if pd.notna(x) and str(x).strip()])
+    
+    # 초기화 시 동은 "전체"로
+    selected_dong = st.selectbox("동", dongs, index=0, key="dong")
+
+# 필터링된 데이터 기준으로 슬라이더 범위 계산 (자치구 > 동 순서로 동적 갱신)
 if selected_district != "전체":
     filter_base = df[df["자치구"] == selected_district]
     if selected_dong != "전체":
@@ -81,94 +133,70 @@ if selected_district != "전체":
 else:
     filter_base = df.copy()
 
-# 건축연도 필터 (필터링된 데이터 기준)
+# 건축연도 필터 (필터링된 데이터 기준) - 동적 갱신
 year_data = filter_base["건축연도"].dropna()
 if len(year_data) > 0:
     min_year = int(year_data.min())
     max_year = int(year_data.max())
+    # 초기화 시 전체 범위로
+    default_year_range = (min_year, max_year)
     year_range = st.sidebar.slider(
         "건축연도 범위",
         min_value=min_year,
         max_value=max_year,
-        value=(min_year, max_year),
-        step=1
+        value=default_year_range,
+        step=1,
+        key="year_range"
     )
 else:
     year_range = (1900, 2025)
 
-# 세대수 필터 (범주화: 0, 100, 300, 500, 1000, 1000>)
+# 세대수 필터 (슬라이더) - 동적 갱신
 household_data = filter_base["세대수"].dropna()
 if len(household_data) > 0:
-    household_options = ["전체", "0", "100", "300", "500", "1000", "1000>"]
-    selected_household = st.sidebar.selectbox("세대수", household_options)
-    
-    # 선택된 범주에 따라 필터링 범위 설정
-    if selected_household == "전체":
-        household_range = (0, float('inf'))
-    elif selected_household == "0":
-        household_range = (0, 0)
-    elif selected_household == "100":
-        household_range = (0, 100)
-    elif selected_household == "300":
-        household_range = (100, 300)
-    elif selected_household == "500":
-        household_range = (300, 500)
-    elif selected_household == "1000":
-        household_range = (500, 1000)
-    else:  # 1000>
-        household_range = (1000, float('inf'))
+    min_household = int(household_data.min())
+    max_household = int(household_data.max())
+    # 초기화 시 전체 범위로
+    default_household_range = (min_household, max_household)
+    household_range = st.sidebar.slider(
+        "세대수 범위",
+        min_value=min_household,
+        max_value=max_household,
+        value=default_household_range,
+        step=100,
+        key="household"
+    )
 else:
-    household_range = (0, float('inf'))
+    household_range = (0, 10000)
 
-# 복도/계단식 필터
+# 복도/계단식 필터 - 동적 갱신
 hallway_types_list = filter_base["복도계단식"].dropna().unique().tolist()
 hallway_types = ["전체"] + sorted([str(x) for x in hallway_types_list if pd.notna(x)])
-selected_hallway = st.sidebar.selectbox("복도/계단식", hallway_types)
+# 초기화 시 "전체"로
+selected_hallway = st.sidebar.selectbox("복도/계단식", hallway_types, index=0, key="hallway")
 
 # 평형 필터 제거 (사용자 요청)
 
-# 지하철역 거리 필터 (범주화: 100m 미만, 100-250m, 250-500m, 500-750m, 750-1000m, 1000-1500, 1500-2000, 2000-3000, 3000>)
+# 지하철역 거리 필터 (슬라이더) - 동적 갱신
 distance_data = filter_base["지하철역거리_km"].dropna()
 if len(distance_data) > 0:
-    distance_options = [
-        "전체",
-        "100m 미만",
-        "100-250m",
-        "250-500m",
-        "500-750m",
-        "750-1000m",
-        "1000-1500m",
-        "1500-2000m",
-        "2000-3000m",
-        "3000m 이상"
-    ]
-    selected_distance = st.sidebar.selectbox("지하철역 거리", distance_options)
-    
-    # 선택된 범주에 따라 필터링 범위 설정 (km 단위)
-    if selected_distance == "전체":
-        distance_range = (0.0, float('inf'))
-    elif selected_distance == "100m 미만":
-        distance_range = (0.0, 0.1)
-    elif selected_distance == "100-250m":
-        distance_range = (0.1, 0.25)
-    elif selected_distance == "250-500m":
-        distance_range = (0.25, 0.5)
-    elif selected_distance == "500-750m":
-        distance_range = (0.5, 0.75)
-    elif selected_distance == "750-1000m":
-        distance_range = (0.75, 1.0)
-    elif selected_distance == "1000-1500m":
-        distance_range = (1.0, 1.5)
-    elif selected_distance == "1500-2000m":
-        distance_range = (1.5, 2.0)
-    elif selected_distance == "2000-3000m":
-        distance_range = (2.0, 3.0)
-    else:  # 3000m 이상
-        distance_range = (3.0, float('inf'))
+    min_distance = float(distance_data.min())
+    max_distance = float(distance_data.max())
+    # 초기화 시 전체 범위로
+    default_distance_range = (min_distance, max_distance)
+    distance_range = st.sidebar.slider(
+        "지하철역 거리 범위 (km)",
+        min_value=min_distance,
+        max_value=max_distance,
+        value=default_distance_range,
+        step=0.01,
+        format="%.2f",
+        key="distance"
+    )
 else:
-    distance_range = (0.0, float('inf'))
+    distance_range = (0.0, 10.0)
 
-# 지하철역 선택 필터 (자치구/동 선택 시 해당 지역 내 지하철역만 표시)
+# 지하철역 선택 필터 (자치구/동 선택 시 해당 지역 내 지하철역만 표시) - 동적 갱신
 if selected_district != "전체":
     # 선택된 자치구에 해당하는 데이터만 필터링
     district_df = df[df["자치구"] == selected_district]
@@ -184,7 +212,8 @@ subway_stations = ["전체"] + sorted(
     [str(x) for x in subway_stations_list if pd.notna(x) and str(x).strip()],
     key=lambda x: x  # 한글은 기본 정렬로 가나다순 정렬됨
 )
-selected_subway = st.sidebar.selectbox("가장 가까운 지하철역", subway_stations)
+# 초기화 시 "전체"로
+selected_subway = st.sidebar.selectbox("가장 가까운 지하철역", subway_stations, index=0, key="subway")
 
 # 필터 적용
 filtered_df = df.copy()
@@ -204,44 +233,32 @@ if len(year_data) > 0:
         (filtered_df["건축연도"] <= year_range[1])
     ]
 
-# 세대수 필터 (NaN 값 처리) - 범주화된 필터 적용
+# 세대수 필터 (NaN 값 처리) - 슬라이더 범위 적용
 if len(household_data) > 0:
-    if household_range[1] == float('inf'):
-        filtered_df = filtered_df[
-            (filtered_df["세대수"].notna()) &
-            (filtered_df["세대수"] >= household_range[0])
-        ]
-    else:
-        filtered_df = filtered_df[
-            (filtered_df["세대수"].notna()) &
-            (filtered_df["세대수"] >= household_range[0]) &
-            (filtered_df["세대수"] <= household_range[1])
-        ]
+    filtered_df = filtered_df[
+        (filtered_df["세대수"].notna()) &
+        (filtered_df["세대수"] >= household_range[0]) &
+        (filtered_df["세대수"] <= household_range[1])
+    ]
 
 if selected_hallway != "전체":
     filtered_df = filtered_df[filtered_df["복도계단식"] == selected_hallway]
 
 # 평형 필터 제거 (사용자 요청)
 
-# 지하철역 거리 필터 (NaN 값 처리)
+# 지하철역 거리 필터 (NaN 값 처리) - 슬라이더 범위 적용
 if len(distance_data) > 0:
-    if distance_range[1] == float('inf'):
-        filtered_df = filtered_df[
-            (filtered_df["지하철역거리_km"].notna()) &
-            (filtered_df["지하철역거리_km"] >= distance_range[0])
-        ]
-    else:
-        filtered_df = filtered_df[
-            (filtered_df["지하철역거리_km"].notna()) &
-            (filtered_df["지하철역거리_km"] >= distance_range[0]) &
-            (filtered_df["지하철역거리_km"] <= distance_range[1])
-        ]
+    filtered_df = filtered_df[
+        (filtered_df["지하철역거리_km"].notna()) &
+        (filtered_df["지하철역거리_km"] >= distance_range[0]) &
+        (filtered_df["지하철역거리_km"] <= distance_range[1])
+    ]
 
 if selected_subway != "전체":
     filtered_df = filtered_df[filtered_df["가장가까운지하철역"] == selected_subway]
 
 # 결과 표시
-st.header(f"📊 검색 결과: {len(filtered_df)}개")
+st.write(f"📊 검색 결과: {len(filtered_df)}개")
 
 if len(filtered_df) > 0:
     # 통계 정보
@@ -316,24 +333,15 @@ if len(filtered_df) > 0:
     tab1, tab2, tab3 = st.tabs(["📋 목록", "🗺️ 지도", "📈 통계"])
     
     with tab1:
-        # 정렬 옵션
-        sort_options = {
-            "건축연도 (최신순)": "건축연도",
-            "건축연도 (오래된순)": "건축연도",
-            "세대수 (많은순)": "세대수",
-            "세대당 평균 평형 (큰순)": "세대당평균평형",
-            "세대당 평균 평형 (작은순)": "세대당평균평형",
-            "주차대수 (많은순)": "주차대수",
-            "세대당 주차면수 (많은순)": "세대당주차면수",
-            "지하철 거리 (가까운순)": "지하철역거리_km"
-        }
-        sort_by = st.selectbox("정렬 기준", list(sort_options.keys()))
-        ascending = "오래된순" in sort_by or "가까운순" in sort_by or "작은순" in sort_by
-        
-        sorted_df = filtered_df.sort_values(
-            by=sort_options[sort_by],
-            ascending=ascending
-        )
+        # 기본 정렬: 건축연도 오름차순 (오래된순)
+        if "건축연도" in filtered_df.columns:
+            sorted_df = filtered_df.sort_values(
+                by="건축연도",
+                ascending=True,
+                na_position='last'  # NaN 값은 맨 뒤로
+            )
+        else:
+            sorted_df = filtered_df.copy()
         
         # 데이터프레임 표시 (화면 출력용 컬럼만 필터링)
         # 원본 데이터는 모두 저장되어 있지만, 화면에는 필요한 컬럼만 표시
@@ -346,8 +354,6 @@ if len(filtered_df) > 0:
             display_columns.append("동")
         if "아파트명" in sorted_df.columns:
             display_columns.append("아파트명")
-        if "주소" in sorted_df.columns:
-            display_columns.append("주소")
         if "건축연도" in sorted_df.columns:
             display_columns.append("건축연도")
         if "세대수" in sorted_df.columns:
@@ -379,6 +385,10 @@ if len(filtered_df) > 0:
         if "지하철역거리_km" in sorted_df.columns:
             display_columns.append("지하철역거리_km")
         
+        # 주소는 맨 우측에 배치
+        if "주소" in sorted_df.columns:
+            display_columns.append("주소")
+        
         # 존재하는 컬럼만 필터링
         display_columns = [col for col in display_columns if col in sorted_df.columns]
         
@@ -401,7 +411,7 @@ if len(filtered_df) > 0:
             "주차대수": "주차",
             "세대당주차면수": "세대당주차",
             "가장가까운지하철역": "지하철역",
-            "지하철역거리_km": "지하철거리(km)"
+            "지하철역거리_km": "역거리"
         }
         
         # 컬럼명 변경
@@ -410,13 +420,13 @@ if len(filtered_df) > 0:
         # 건축연도 포맷팅 (콤마 제거, 정수로 표시)
         if "연도" in display_df.columns:
             display_df["연도"] = display_df["연도"].apply(
-                lambda x: int(x) if pd.notna(x) else None
+                lambda x: str(int(x)) if pd.notna(x) else ""
             )
         
         st.dataframe(
             display_df,
             use_container_width=True,
-            height=400,
+            height=700,
             hide_index=True
         )
         
@@ -430,47 +440,95 @@ if len(filtered_df) > 0:
         )
     
     with tab2:
-        st.subheader("아파트 위치 지도")
-        
         # 지도 생성
         if len(filtered_df) > 0:
-            center_lat = filtered_df["위도"].mean()
-            center_lon = filtered_df["경도"].mean()
+            # 필터링된 데이터의 유효한 좌표만 사용하여 중심점 계산
+            valid_coords = filtered_df[
+                (filtered_df["위도"].notna()) & 
+                (filtered_df["경도"].notna())
+            ]
+            
+            if len(valid_coords) > 0:
+                # 중심점 계산
+                center_lat = valid_coords["위도"].mean()
+                center_lon = valid_coords["경도"].mean()
+                
+                # 데이터 범위 계산
+                min_lat = valid_coords["위도"].min()
+                max_lat = valid_coords["위도"].max()
+                min_lon = valid_coords["경도"].min()
+                max_lon = valid_coords["경도"].max()
+                
+                # 범위에 따른 적절한 초기 줌 레벨 계산
+                lat_range = max_lat - min_lat
+                lon_range = max_lon - min_lon
+                max_range = max(lat_range, lon_range)
+                
+                # 범위에 따른 적절한 줌 레벨 계산
+                if max_range < 0.01:  # 매우 좁은 범위 (약 1km)
+                    zoom_start = 15
+                elif max_range < 0.05:  # 좁은 범위 (약 5km)
+                    zoom_start = 13
+                elif max_range < 0.1:  # 중간 범위 (약 10km)
+                    zoom_start = 12
+                elif max_range < 0.2:  # 넓은 범위 (약 20km)
+                    zoom_start = 11
+                else:  # 매우 넓은 범위
+                    zoom_start = 10
+            else:
+                # 유효한 좌표가 없으면 서울 중심 좌표 사용
+                center_lat = 37.5665
+                center_lon = 126.9780
+                zoom_start = 11
+                min_lat = max_lat = min_lon = max_lon = None
             
             m = folium.Map(
                 location=[center_lat, center_lon],
-                zoom_start=11,
+                zoom_start=zoom_start,
                 tiles="OpenStreetMap"
             )
             
-            # 마커 추가
+            # 마커 추가 (유효한 좌표만)
             for idx, row in filtered_df.iterrows():
-                # 아파트명이 있으면 포함
-                apt_name = row.get('아파트명', '') or row.get('주소', '')
-                popup_text = f"""
-                <b>{apt_name}</b><br>
-                주소: {row.get('주소', '')}<br>
-                자치구: {row.get('자치구', '')}<br>
-                건축연도: {row.get('건축연도', '')}년<br>
-                세대수: {row.get('세대수', '')}세대<br>
-                평형: {row.get('평형', '')}평<br>
-                지하철역: {row.get('가장가까운지하철역', '')} ({row.get('지하철역거리_km', '')}km)
-                """
-                
-                # 툴팁에 아파트명 또는 주소 표시
-                tooltip_text = row.get('아파트명', '') or row.get('주소', '')
-                folium.Marker(
-                    [row["위도"], row["경도"]],
-                    popup=folium.Popup(popup_text, max_width=300),
-                    tooltip=tooltip_text
-                ).add_to(m)
+                # 좌표가 유효한 경우에만 마커 추가
+                if pd.notna(row.get("위도")) and pd.notna(row.get("경도")):
+                    # 아파트명이 있으면 포함
+                    apt_name = row.get('아파트명', '') or row.get('주소', '')
+                    popup_text = f"""
+                    <b>{apt_name}</b><br>
+                    주소: {row.get('주소', '')}<br>
+                    자치구: {row.get('자치구', '')}<br>
+                    건축연도: {row.get('건축연도', '')}년<br>
+                    세대수: {row.get('세대수', '')}세대<br>
+                    평형: {row.get('평형', '')}평<br>
+                    지하철역: {row.get('가장가까운지하철역', '')} ({row.get('지하철역거리_km', '')}km)
+                    """
+                    
+                    # 툴팁에 아파트명 또는 주소 표시
+                    tooltip_text = row.get('아파트명', '') or row.get('주소', '')
+                    folium.Marker(
+                        [row["위도"], row["경도"]],
+                        popup=folium.Popup(popup_text, max_width=300),
+                        tooltip=tooltip_text
+                    ).add_to(m)
             
-            st_folium(m, width=1200, height=600)
+            # 모든 마커가 보이도록 bounds 설정 (유효한 좌표가 있는 경우만)
+            if len(valid_coords) > 0 and min_lat is not None:
+                padding = 0.01  # 약 1km 여유 공간
+                m.fit_bounds(
+                    [[min_lat - padding, min_lon - padding],
+                     [max_lat + padding, max_lon + padding]],
+                    padding=(20, 20)  # 픽셀 단위 여유 공간
+                )
+            
+            # 지도 중앙 정렬을 위한 컬럼 사용
+            col1, col2, col3 = st.columns([1, 10, 1])
+            with col2:
+                st_folium(m, width=None, height=600, use_container_width=True)
         else:
             st.info("표시할 데이터가 없습니다.")
     
     with tab3:
-        st.subheader("통계 분석")
         st.info("💡 통계는 필터링과 무관하게 전체 데이터 기준으로 표시됩니다.")
         
         col1, col2 = st.columns(2)
@@ -513,7 +571,6 @@ if len(filtered_df) > 0:
                     st.bar_chart(pyeong_counts)
         
         st.markdown("---")
-        st.subheader("📊 자치구별 상세 통계")
         
         # 자치구별 통계 계산 (전체 데이터 기준)
         if "자치구" in df.columns:
@@ -586,6 +643,7 @@ if len(filtered_df) > 0:
                 st.dataframe(
                     stats_df,
                     use_container_width=True,
+                    height=910,
                     hide_index=True
                 )
                 
@@ -618,12 +676,47 @@ password_input = st.sidebar.text_input("비밀번호 입력", type="password", k
 if st.sidebar.button("새 데이터 생성"):
     if password_input == required_password:
         with st.sidebar:
-            with st.spinner("데이터 생성 중..."):
-                crawler = SeoulApartmentCrawler()
-                new_df = crawler.generate_sample_data(num_samples=500)
-                crawler.save_to_csv(new_df, "seoul_apartments.csv")
-                st.success("새 데이터가 생성되었습니다!")
-                st.rerun()
+            with st.status("🌐 서울 열린데이터광장 API에서 데이터 수집 중...", expanded=True) as status:
+                try:
+                    crawler = SeoulApartmentCrawler()
+                    
+                    # 먼저 작은 범위로 테스트
+                    st.write("📡 API 연결 테스트 중... (1~100건)")
+                    test_df = crawler.crawl_seoul_apartment_info(1, 100)
+                    
+                    if not test_df.empty:
+                        st.write(f"API 테스트 성공! {len(test_df)}건 수집")
+                        st.write("📥 전체 데이터 수집 시작 (1000개씩 배치)...")
+                        
+                        # 전체 데이터 수집 (5000개로 제한하여 시간 단축)
+                        all_df = crawler.crawl_seoul_apartment_info_all(max_records=5000)
+                        
+                        if not all_df.empty:
+                            st.write("🔄 데이터 처리 중...")
+                            processed_df = crawler.process_seoul_apartment_info_data(all_df)
+                            
+                            st.write("💾 파일 저장 중...")
+                            crawler.save_to_csv(processed_df, "seoul_apartments_metadata.csv")
+                            
+                            # 캐시 클리어하여 새 데이터 로드
+                            load_data.clear()
+                            
+                            status.update(label=f"✅ 데이터 수집 완료! (총 {len(processed_df)}건)", state="complete")
+                            st.success(f"실제 아파트 메타데이터 {len(processed_df)}건이 수집되었습니다!")
+                            st.info("🔄 화면이 새로고침되며 새로 수집된 데이터가 표시됩니다.")
+                            st.rerun()
+                        else:
+                            status.update(label="❌ 데이터 수집 실패", state="error")
+                            st.error("❌ 전체 데이터 수집에 실패했습니다. API 키를 확인해주세요.")
+                    else:
+                        status.update(label="❌ API 테스트 실패", state="error")
+                        st.error("❌ API 연결에 실패했습니다. API 키를 확인해주세요.")
+                        st.info("💡 API 키는 .env 파일 또는 환경변수에 SEOUL_DATA_API_KEY로 설정하세요.")
+                        
+                except Exception as e:
+                    status.update(label="❌ 오류 발생", state="error")
+                    st.error(f"❌ 오류가 발생했습니다: {str(e)}")
+                    st.info("💡 API 키가 설정되어 있는지 확인하거나, 샘플 데이터를 사용하세요.")
     else:
         st.sidebar.error("❌ 비밀번호가 올바르지 않습니다.")
 
