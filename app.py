@@ -1,13 +1,41 @@
 """
 서울 아파트 검색 앱 (Streamlit)
 """
-import streamlit as st
+import os
+
 import pandas as pd
+import streamlit as st
 import folium
 from streamlit_folium import st_folium
+
 from crawler import SeoulApartmentCrawler
 from utils import extract_dong
-import os
+
+# 새로 수집한 데이터를 세션에 넣어두는 키 (Cloud에서 파일 저장이 안 돼도 새로고침 반영)
+SESSION_KEY_APARTMENT_DATA = "apartment_data"
+
+
+def preprocess_apartment_df(df: pd.DataFrame) -> pd.DataFrame:
+    """CSV/API에서 읽은 df에 동일한 전처리(동 추가, 임대·오피스텔 제외 등) 적용."""
+    if df.empty:
+        return df
+    df = df.copy()
+    if "동" not in df.columns:
+        if "원본_EMD_ADDR" in df.columns:
+            df["동"] = df["원본_EMD_ADDR"].apply(
+                lambda x: str(x).strip() if pd.notna(x) and str(x).strip() and str(x).strip() != "nan" else None
+            )
+        else:
+            df["동"] = df["주소"].apply(extract_dong)
+    if "아파트명" in df.columns:
+        df = df[~df["아파트명"].astype(str).str.contains("임대", na=False)]
+    if "원본_CMPX_CLSF" in df.columns:
+        df = df[df["원본_CMPX_CLSF"].astype(str).str.contains("아파트", na=False)]
+    if "아파트명" in df.columns:
+        df = df[~df["아파트명"].astype(str).str.contains("오피스텔", na=False, case=False)]
+    if "동" in df.columns:
+        df["동"] = df["동"].replace("답십리1동", "답십리동")
+    return df
 
 
 # 페이지 설정
@@ -25,53 +53,27 @@ st.set_page_config(
 # 데이터 로드 함수
 @st.cache_data
 def load_data():
-    """데이터 로드 (캐싱)"""
+    """데이터 로드 (캐싱). 세션에 새로 수집한 데이터가 있으면 최우선 사용."""
+    # 1) 새로고침으로 수집한 데이터가 세션에 있으면 그대로 사용 (Cloud에서 파일 저장 안 돼도 동작)
+    if SESSION_KEY_APARTMENT_DATA in st.session_state:
+        df = st.session_state[SESSION_KEY_APARTMENT_DATA]
+        if df is not None and not df.empty:
+            return df, "metadata", len(df)
+
     crawler = SeoulApartmentCrawler()
-    
-    # 우선순위: 메타데이터 > 일반 데이터 > 샘플 데이터
+    # 2) CSV 또는 샘플
     if os.path.exists("seoul_apartments_metadata.csv"):
         df = crawler.load_from_csv("seoul_apartments_metadata.csv")
         data_type = "metadata"
     elif os.path.exists("seoul_apartments.csv"):
         df = crawler.load_from_csv("seoul_apartments.csv")
-        # 샘플 데이터인지 확인 (아파트명 컬럼이 없으면 샘플)
-        if "아파트명" not in df.columns:
-            data_type = "sample"
-        else:
-            data_type = "normal"
+        data_type = "sample" if "아파트명" not in df.columns else "normal"
     else:
         df = crawler.generate_sample_data(num_samples=500)
         crawler.save_to_csv(df, "seoul_apartments.csv")
         data_type = "generated"
-    
-    # 동 정보 추가 (신규 데이터 기준: 원본_EMD_ADDR 사용, 없으면 주소에서 추출)
-    if "동" not in df.columns:
-        if "원본_EMD_ADDR" in df.columns:
-            # 원본_EMD_ADDR에서 동 정보 추출 (예: "흑석동" -> 그대로 사용)
-            df["동"] = df["원본_EMD_ADDR"].apply(
-                lambda x: str(x).strip() if pd.notna(x) and str(x).strip() and str(x).strip() != 'nan' else None
-            )
-        else:
-            # 원본 컬럼이 없으면 주소에서 추출
-            df["동"] = df["주소"].apply(extract_dong)
-    
-    # '임대'가 포함된 아파트명 행 제외
-    if "아파트명" in df.columns:
-        df = df[~df["아파트명"].astype(str).str.contains("임대", na=False)]
-    
-    # 오피스텔 및 주상복합 제외 (원본_CMPX_CLSF 컬럼 사용)
-    if "원본_CMPX_CLSF" in df.columns:
-        # "아파트"만 남기고 나머지(주상복합, 연립주택, 도시형 생활주택 등) 제외
-        df = df[df["원본_CMPX_CLSF"].astype(str).str.contains("아파트", na=False)]
-    
-    # 아파트명에 "오피스텔"이 포함된 경우도 제외
-    if "아파트명" in df.columns:
-        df = df[~df["아파트명"].astype(str).str.contains("오피스텔", na=False, case=False)]
-    
-    # '답십리1동'을 '답십리동'으로 예외처리
-    if "동" in df.columns:
-        df["동"] = df["동"].replace("답십리1동", "답십리동")
-    
+
+    df = preprocess_apartment_df(df)
     return df, data_type, len(df)
 
 
@@ -94,7 +96,7 @@ if "동" not in df.columns:
 st.sidebar.header("🔍 검색 필터")
 
 # 초기화 버튼 (자치구 제외하고 모든 필터 초기화)
-if st.sidebar.button("🔄 필터 초기화", use_container_width=True):
+if st.sidebar.button("🔄 필터 초기화", width="stretch"):
     # 필터 관련 session_state 키들 초기화 (자치구 제외)
     filter_keys = ['dong', 'year_range', 'household', 'hallway', 'distance', 'subway']
     for key in filter_keys:
@@ -151,13 +153,13 @@ if len(year_data) > 0:
 else:
     year_range = (1900, 2025)
 
-# 세대수 필터 (슬라이더) - 동적 갱신
+# 세대수 필터 (슬라이더) - 동적 갱신, 기본 최소 300세대 이상
 household_data = filter_base["세대수"].dropna()
 if len(household_data) > 0:
     min_household = int(household_data.min())
     max_household = int(household_data.max())
-    # 초기화 시 전체 범위로
-    default_household_range = (min_household, max_household)
+    default_household_low = min(max(300, min_household), max_household)
+    default_household_range = (default_household_low, max_household)
     household_range = st.sidebar.slider(
         "세대수 범위",
         min_value=min_household,
@@ -425,7 +427,7 @@ if len(filtered_df) > 0:
         
         st.dataframe(
             display_df,
-            use_container_width=True,
+            width="stretch",
             height=700,
             hide_index=True
         )
@@ -524,7 +526,7 @@ if len(filtered_df) > 0:
             # 지도 중앙 정렬을 위한 컬럼 사용
             col1, col2, col3 = st.columns([1, 10, 1])
             with col2:
-                st_folium(m, width=None, height=600, use_container_width=True)
+                st_folium(m, height=600, width="stretch")
         else:
             st.info("표시할 데이터가 없습니다.")
     
@@ -642,7 +644,7 @@ if len(filtered_df) > 0:
                 stats_df = pd.DataFrame(district_stats)
                 st.dataframe(
                     stats_df,
-                    use_container_width=True,
+                    width="stretch",
                     height=910,
                     hide_index=True
                 )
@@ -694,15 +696,19 @@ if st.sidebar.button("새 데이터 생성"):
                         if not all_df.empty:
                             st.write("🔄 데이터 처리 중...")
                             processed_df = crawler.process_seoul_apartment_info_data(all_df)
-                            
-                            st.write("💾 파일 저장 중...")
-                            crawler.save_to_csv(processed_df, "seoul_apartments_metadata.csv")
-                            
-                            # 캐시 클리어하여 새 데이터 로드
+                            df_fresh = preprocess_apartment_df(processed_df)
+
+                            # 세션에 저장 → 새로고침 시 load_data()가 이걸 최우선 사용 (Cloud에서도 동작)
+                            st.session_state[SESSION_KEY_APARTMENT_DATA] = df_fresh
+
+                            try:
+                                crawler.save_to_csv(processed_df, "seoul_apartments_metadata.csv")
+                            except Exception:
+                                pass
+
                             load_data.clear()
-                            
-                            status.update(label=f"✅ 데이터 수집 완료! (총 {len(processed_df)}건)", state="complete")
-                            st.success(f"실제 아파트 메타데이터 {len(processed_df)}건이 수집되었습니다!")
+                            status.update(label=f"✅ 데이터 수집 완료! (총 {len(df_fresh)}건)", state="complete")
+                            st.success(f"실제 아파트 메타데이터 {len(df_fresh)}건이 수집되었습니다!")
                             st.info("🔄 화면이 새로고침되며 새로 수집된 데이터가 표시됩니다.")
                             st.rerun()
                         else:
