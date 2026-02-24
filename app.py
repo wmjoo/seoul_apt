@@ -2,6 +2,8 @@
 서울 아파트 검색 앱 (Streamlit)
 """
 import os
+import re
+from difflib import SequenceMatcher
 
 import pandas as pd
 import streamlit as st
@@ -13,6 +15,76 @@ from utils import extract_dong
 
 # 새로 수집한 데이터를 세션에 넣어두는 키 (Cloud에서 파일 저장이 안 돼도 새로고침 반영)
 SESSION_KEY_APARTMENT_DATA = "apartment_data"
+# 메인 아파트(실거래가) 단지명 유사도 매칭 임계값 (0~1)
+MAIN_APT_SIMILARITY_THRESHOLD = 0.85
+
+
+def normalize_dong(dong):
+    """동 표기 정규화: '역삼2동' → '역삼동', '삼성1동' → '삼성동' (숫자 제거)."""
+    if dong is None or (isinstance(dong, float) and pd.isna(dong)):
+        return ""
+    s = str(dong).strip()
+    if not s:
+        return ""
+    return re.sub(r"\d+동$", "동", s)
+
+
+def normalize_apt(name):
+    """단지명 정규화: 공백 collapse, 앞뒤 공백 제거."""
+    if name is None or (isinstance(name, float) and pd.isna(name)):
+        return ""
+    return " ".join(str(name).strip().split())
+
+
+def enrich_with_main_apt(df: pd.DataFrame, main_path: str) -> pd.DataFrame:
+    """
+    메인 아파트 CSV와 동 정규화 + 단지명 유사도 매칭으로 left join.
+    매칭되면 평수, 실거래가, 기준연월일 컬럼 추가; 안 되면 공란.
+    """
+    if not os.path.exists(main_path) or df.empty:
+        return df
+    try:
+        main = pd.read_csv(main_path, encoding="utf-8-sig")
+        main = main[["구", "동", "아파트명", "평수", "실거래가", "기준연월일"]].drop_duplicates(
+            subset=["구", "동", "아파트명"], keep="first"
+        )
+    except Exception:
+        return df
+    main["norm_동"] = main["동"].apply(normalize_dong)
+    main["norm_아파트명"] = main["아파트명"].apply(normalize_apt)
+    # (구, norm_동)별 후보 리스트
+    main_by_key = {}
+    for _, row in main.iterrows():
+        key = (row["구"], row["norm_동"])
+        if key not in main_by_key:
+            main_by_key[key] = []
+        main_by_key[key].append(row)
+
+    df = df.copy()
+    df["평수"] = None
+    df["실거래가"] = None
+    df["기준연월일"] = None
+    if "자치구" not in df.columns or "동" not in df.columns or "아파트명" not in df.columns:
+        return df
+    for i in df.index:
+        gu = df.at[i, "자치구"]
+        dong = df.at[i, "동"]
+        apt = df.at[i, "아파트명"]
+        norm_dong = normalize_dong(dong)
+        norm_apt = normalize_apt(apt)
+        candidates = main_by_key.get((gu, norm_dong), [])
+        if not candidates:
+            continue
+        best = max(
+            candidates,
+            key=lambda c: SequenceMatcher(None, norm_apt, c["norm_아파트명"]).ratio(),
+        )
+        sim = SequenceMatcher(None, norm_apt, best["norm_아파트명"]).ratio()
+        if sim >= MAIN_APT_SIMILARITY_THRESHOLD:
+            df.at[i, "평수"] = best["평수"]
+            df.at[i, "실거래가"] = best["실거래가"]
+            df.at[i, "기준연월일"] = best["기준연월일"]
+    return df
 
 
 def preprocess_apartment_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -91,6 +163,9 @@ elif data_type == "generated":
 # 동 정보 추가 (없으면 생성)
 if "동" not in df.columns:
     df["동"] = df["주소"].apply(extract_dong)
+
+# 메인 아파트(실거래가) CSV와 동 정규화 + 단지명 유사도 매칭으로 평수/실거래가/기준연월일 추가
+df = enrich_with_main_apt(df, "seoul_disrict_main_apt.csv")
 
 # 사이드바 필터
 st.sidebar.header("🔍 검색 필터")
@@ -366,7 +441,13 @@ if len(filtered_df) > 0:
         # 면적 정보 (세대당 평균만 표시)
         if "세대당평균평형" in sorted_df.columns:
             display_columns.append("세대당평균평형")
-        
+        # 메인 아파트 실거래가 (동·단지명 정규화+유사도 매칭, 없으면 공란)
+        if "평수" in sorted_df.columns:
+            display_columns.append("평수")
+        if "실거래가" in sorted_df.columns:
+            display_columns.append("실거래가")
+        if "기준연월일" in sorted_df.columns:
+            display_columns.append("기준연월일")
         # 전용면적별 세대현황 (평형별 세대수 분포)
         if "전용면적60㎡이하_세대수" in sorted_df.columns:
             display_columns.append("전용면적60㎡이하_세대수")
@@ -407,6 +488,9 @@ if len(filtered_df) > 0:
             "세대수": "세대수",
             "복도계단식": "복도/계단",
             "세대당평균평형": "평형",
+            "평수": "평수",
+            "실거래가": "실거래가",
+            "기준연월일": "기준연월일",
             "전용면적60㎡이하_세대수": "60㎡이하",
             "전용면적60_85㎡_세대수": "60~85㎡",
             "전용면적85_135㎡_세대수": "85~135㎡",
@@ -418,7 +502,10 @@ if len(filtered_df) > 0:
         
         # 컬럼명 변경
         display_df = display_df.rename(columns=column_mapping)
-        
+        # 매칭 안 된 행: 평수/실거래가/기준연월일 공란 처리
+        for _col in ["평수", "실거래가", "기준연월일"]:
+            if _col in display_df.columns:
+                display_df[_col] = display_df[_col].apply(lambda x: "" if pd.isna(x) else x)
         # 건축연도 포맷팅 (콤마 제거, 정수로 표시)
         if "연도" in display_df.columns:
             display_df["연도"] = display_df["연도"].apply(
