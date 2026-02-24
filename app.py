@@ -15,8 +15,8 @@ from utils import extract_dong
 
 # 새로 수집한 데이터를 세션에 넣어두는 키 (Cloud에서 파일 저장이 안 돼도 새로고침 반영)
 SESSION_KEY_APARTMENT_DATA = "apartment_data"
-# 메인 아파트(실거래가) 단지명 유사도 매칭 임계값 (0~1). 0.82로 완화해 매칭률 상승
-MAIN_APT_SIMILARITY_THRESHOLD = 0.82
+# 메인 아파트(실거래가) 단지명 유사도 매칭 임계값 (0~1). 0.75로 완화해 매칭률 상승
+MAIN_APT_SIMILARITY_THRESHOLD = 0.75
 
 
 def normalize_dong(dong):
@@ -53,7 +53,12 @@ def enrich_with_main_apt(df: pd.DataFrame, main_path: str) -> pd.DataFrame:
     - 1차: (자치구, norm_동) 일치 후보 중 단지명 유사도(강화 정규화) >= 임계값
     - 2차(fallback): 동 후보 없으면 자치구만으로 후보 확대 후 동일 유사도 매칭
     매칭되면 평수, 실거래가, 기준연월일 추가; 안 되면 공란.
+    파일 없어도 컬럼은 추가해 테이블에 항상 표시.
     """
+    df = df.copy()
+    df["평수"] = None
+    df["실거래가"] = None
+    df["기준연월일"] = None
     if not os.path.exists(main_path) or df.empty:
         return df
     try:
@@ -78,10 +83,6 @@ def enrich_with_main_apt(df: pd.DataFrame, main_path: str) -> pd.DataFrame:
             main_by_gu[g] = []
         main_by_gu[g].append(row)
 
-    df = df.copy()
-    df["평수"] = None
-    df["실거래가"] = None
-    df["기준연월일"] = None
     if "자치구" not in df.columns or "동" not in df.columns or "아파트명" not in df.columns:
         return df
     for i in df.index:
@@ -172,20 +173,28 @@ def load_data():
 # 데이터 로드
 df, data_type, data_count = load_data()
 
-# 데이터 로드 메시지 표시 (캐시 함수 밖에서)
-if data_type == "metadata":
-    st.toast(f"실제 아파트 메타데이터 로드 완료 ({data_count}건)", icon="✅")
-elif data_type == "sample":
-    st.toast("샘플 데이터를 사용 중입니다.", icon="⚠️")
-elif data_type == "generated":
-    st.toast("데이터 파일이 없습니다. 샘플 데이터를 생성합니다...", icon="ℹ️")
+# 데이터 로드 메시지 표시 (toast 비활성화)
+# if data_type == "metadata":
+#     st.toast(f"실제 아파트 메타데이터 로드 완료 ({data_count}건)", icon="✅")
+# elif data_type == "sample":
+#     st.toast("샘플 데이터를 사용 중입니다.", icon="⚠️")
+# elif data_type == "generated":
+#     st.toast("데이터 파일이 없습니다. 샘플 데이터를 생성합니다...", icon="ℹ️")
 
 # 동 정보 추가 (없으면 생성)
 if "동" not in df.columns:
     df["동"] = df["주소"].apply(extract_dong)
 
 # 메인 아파트(실거래가) CSV와 동 정규화 + 단지명 유사도 매칭으로 평수/실거래가/기준연월일 추가
-df = enrich_with_main_apt(df, "seoul_disrict_main_apt.csv")
+_main_apt_file = "seoul_disrict_main_apt.csv"
+if not os.path.exists(_main_apt_file):
+    try:
+        _alt = os.path.join(os.path.dirname(os.path.abspath(__file__)), _main_apt_file)
+        if os.path.exists(_alt):
+            _main_apt_file = _alt
+    except NameError:
+        pass
+df = enrich_with_main_apt(df, _main_apt_file)
 
 # 사이드바 필터
 st.sidebar.header("🔍 검색 필터")
@@ -772,16 +781,21 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 데이터 새로고침")
 
-# Streamlit secrets에서 비밀번호 확인 (TOML 숫자/공백/키 없음 대응)
+# Streamlit secrets에서 비밀번호 확인
+# Cloud Secrets: [secrets] 섹션 사용 시 → st.secrets["secrets"]["data_password"]
+#               섹션 없이 data_password = "xxx" → st.secrets["data_password"]
 def _get_data_password():
     try:
         if not getattr(st, "secrets", None):
             return ""
-        # .get() 없을 수 있어 [] 접근 시도
+        raw = None
         try:
-            raw = st.secrets["data_password"]
-        except (KeyError, TypeError):
-            raw = getattr(st.secrets, "get", lambda k, d=None: d)("data_password", None)
+            raw = st.secrets["secrets"]["data_password"]
+        except (KeyError, TypeError, AttributeError):
+            try:
+                raw = st.secrets["data_password"]
+            except (KeyError, TypeError):
+                raw = getattr(st.secrets, "data_password", None)
         if raw is None:
             return ""
         return str(raw).strip()
