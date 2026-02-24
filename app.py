@@ -15,8 +15,8 @@ from utils import extract_dong
 
 # 새로 수집한 데이터를 세션에 넣어두는 키 (Cloud에서 파일 저장이 안 돼도 새로고침 반영)
 SESSION_KEY_APARTMENT_DATA = "apartment_data"
-# 메인 아파트(실거래가) 단지명 유사도 매칭 임계값 (0~1)
-MAIN_APT_SIMILARITY_THRESHOLD = 0.85
+# 메인 아파트(실거래가) 단지명 유사도 매칭 임계값 (0~1). 0.82로 완화해 매칭률 상승
+MAIN_APT_SIMILARITY_THRESHOLD = 0.82
 
 
 def normalize_dong(dong):
@@ -36,10 +36,23 @@ def normalize_apt(name):
     return " ".join(str(name).strip().split())
 
 
+def normalize_apt_strong(name):
+    """단지명 강화 정규화(유사도 비교용): 1차/2차, 아파트, 단지, 괄호 안 내용 제거 후 공백 제거."""
+    t = normalize_apt(name)
+    t = re.sub(r"\s*[\(\（].*?[\)\）]\s*", "", t)
+    t = re.sub(r"\s*[1-3]차\s*", "", t)
+    t = re.sub(r"\s*아파트\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s*단지\s*", "", t)
+    t = re.sub(r"\s+", "", t)
+    return t
+
+
 def enrich_with_main_apt(df: pd.DataFrame, main_path: str) -> pd.DataFrame:
     """
     메인 아파트 CSV와 동 정규화 + 단지명 유사도 매칭으로 left join.
-    매칭되면 평수, 실거래가, 기준연월일 컬럼 추가; 안 되면 공란.
+    - 1차: (자치구, norm_동) 일치 후보 중 단지명 유사도(강화 정규화) >= 임계값
+    - 2차(fallback): 동 후보 없으면 자치구만으로 후보 확대 후 동일 유사도 매칭
+    매칭되면 평수, 실거래가, 기준연월일 추가; 안 되면 공란.
     """
     if not os.path.exists(main_path) or df.empty:
         return df
@@ -51,14 +64,19 @@ def enrich_with_main_apt(df: pd.DataFrame, main_path: str) -> pd.DataFrame:
     except Exception:
         return df
     main["norm_동"] = main["동"].apply(normalize_dong)
-    main["norm_아파트명"] = main["아파트명"].apply(normalize_apt)
-    # (구, norm_동)별 후보 리스트
+    main["norm_아파트명"] = main["아파트명"].apply(normalize_apt_strong)
+    # (구, norm_동)별 후보 + 구별 후보(fallback)
     main_by_key = {}
+    main_by_gu = {}
     for _, row in main.iterrows():
         key = (row["구"], row["norm_동"])
         if key not in main_by_key:
             main_by_key[key] = []
         main_by_key[key].append(row)
+        g = row["구"]
+        if g not in main_by_gu:
+            main_by_gu[g] = []
+        main_by_gu[g].append(row)
 
     df = df.copy()
     df["평수"] = None
@@ -71,8 +89,10 @@ def enrich_with_main_apt(df: pd.DataFrame, main_path: str) -> pd.DataFrame:
         dong = df.at[i, "동"]
         apt = df.at[i, "아파트명"]
         norm_dong = normalize_dong(dong)
-        norm_apt = normalize_apt(apt)
+        norm_apt = normalize_apt_strong(apt)
         candidates = main_by_key.get((gu, norm_dong), [])
+        if not candidates:
+            candidates = main_by_gu.get(gu, [])
         if not candidates:
             continue
         best = max(
@@ -752,12 +772,27 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 데이터 새로고침")
 
-# Streamlit secrets에서 비밀번호 확인 (TOML에서 숫자로 들어오면 문자열로 통일)
-required_password = str(st.secrets.get("data_password", "1234")).strip()
+# Streamlit secrets에서 비밀번호 확인 (TOML 숫자/공백/키 없음 대응)
+def _get_data_password():
+    try:
+        if not getattr(st, "secrets", None):
+            return ""
+        # .get() 없을 수 있어 [] 접근 시도
+        try:
+            raw = st.secrets["data_password"]
+        except (KeyError, TypeError):
+            raw = getattr(st.secrets, "get", lambda k, d=None: d)("data_password", None)
+        if raw is None:
+            return ""
+        return str(raw).strip()
+    except Exception:
+        return ""
 
-# 비밀번호 입력
+required_password = _get_data_password() or "1234"
 password_input = st.sidebar.text_input("비밀번호 입력", type="password", key="data_password_input")
-password_ok = password_input and (password_input.strip() == required_password)
+input_stripped = (password_input or "").strip()
+required_stripped = (required_password or "").strip()
+password_ok = bool(required_stripped and input_stripped == required_stripped)
 
 if st.sidebar.button("새 데이터 생성"):
     if password_ok:
