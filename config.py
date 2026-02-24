@@ -20,21 +20,31 @@ load_dotenv()
 def get_secret(key: str, default: str = None) -> str:
     """Secrets 또는 환경변수에서 값을 가져옵니다.
     우선순위: Streamlit Secrets > 환경변수 > .env 파일 > 기본값
+    Cloud Secrets: [secrets] 섹션 사용 시 st.secrets["secrets"][key]에 위치
     """
-    # Streamlit Secrets 확인
     if USE_STREAMLIT_SECRETS:
         try:
-            if hasattr(st, 'secrets') and key in st.secrets:
-                return st.secrets[key]
-        except:
+            if hasattr(st, "secrets") and st.secrets:
+                # 1) [secrets] 섹션 하위 (Cloud에서 [secrets] 붙여넣은 경우)
+                try:
+                    val = st.secrets["secrets"][key]
+                    if val is not None:
+                        return str(val).strip()
+                except (KeyError, TypeError, AttributeError):
+                    pass
+                # 2) 최상위 키
+                try:
+                    val = st.secrets[key]
+                    if val is not None:
+                        return str(val).strip()
+                except (KeyError, TypeError):
+                    pass
+        except Exception:
             pass
-    
-    # 환경변수 확인
+
     value = os.getenv(key)
     if value:
         return value
-    
-    # 기본값 반환
     return default
 
 # 공공데이터포털 API 키 (https://www.data.go.kr 에서 발급)

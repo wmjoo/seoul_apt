@@ -803,15 +803,17 @@ def _get_data_password():
         return ""
 
 required_password = _get_data_password() or "1234"
-password_input = st.sidebar.text_input("비밀번호 입력", type="password", key="data_password_input")
+_col_pw, _col_btn = st.sidebar.columns([1, 1])
+with _col_pw:
+    password_input = st.text_input("비밀번호 입력", type="password", key="data_password_input")
 input_stripped = (password_input or "").strip()
 required_stripped = (required_password or "").strip()
 password_ok = bool(required_stripped and input_stripped == required_stripped)
 
-# 비밀번호가 맞을 때만 '새 데이터 생성' 버튼 표시
+# 비밀번호가 맞을 때만 오른쪽 영역에 '새 데이터 생성' 버튼 표시
 if password_ok:
-    if st.sidebar.button("새 데이터 생성"):
-        with st.sidebar:
+    with _col_btn:
+        if st.button("새 데이터 생성", width="stretch"):
             with st.status("🌐 서울 열린데이터광장 API에서 데이터 수집 중...", expanded=True) as status:
                 try:
                     crawler = SeoulApartmentCrawler()
@@ -855,5 +857,6 @@ if password_ok:
                     st.error(f"❌ 오류가 발생했습니다: {str(e)}")
                     st.info("💡 API 키가 설정되어 있는지 확인하거나, 샘플 데이터를 사용하세요.")
 else:
-    st.sidebar.caption("비밀번호가 일치하면 버튼이 표시됩니다.")
+    with _col_btn:
+        st.caption("비밀번호가 일치하면 버튼이 표시됩니다.")
 
