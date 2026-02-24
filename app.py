@@ -665,18 +665,15 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 데이터 새로고침")
 
-# Streamlit secrets에서 비밀번호 확인
-if "data_password" in st.secrets:
-    required_password = st.secrets["data_password"]
-else:
-    # 기본 비밀번호 (secrets에 없을 경우)
-    required_password = "1234"
+# Streamlit secrets에서 비밀번호 확인 (TOML에서 숫자로 들어오면 문자열로 통일)
+required_password = str(st.secrets.get("data_password", "1234")).strip()
 
 # 비밀번호 입력
 password_input = st.sidebar.text_input("비밀번호 입력", type="password", key="data_password_input")
+password_ok = password_input and (password_input.strip() == required_password)
 
 if st.sidebar.button("새 데이터 생성"):
-    if password_input == required_password:
+    if password_ok:
         with st.sidebar:
             with st.status("🌐 서울 열린데이터광장 API에서 데이터 수집 중...", expanded=True) as status:
                 try:
