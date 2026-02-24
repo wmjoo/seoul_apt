@@ -794,14 +794,14 @@ input_stripped = (password_input or "").strip()
 required_stripped = (required_password or "").strip()
 password_ok = bool(required_stripped and input_stripped == required_stripped)
 
-if st.sidebar.button("새 데이터 생성"):
-    if password_ok:
+# 비밀번호가 맞을 때만 '새 데이터 생성' 버튼 표시
+if password_ok:
+    if st.sidebar.button("새 데이터 생성"):
         with st.sidebar:
             with st.status("🌐 서울 열린데이터광장 API에서 데이터 수집 중...", expanded=True) as status:
                 try:
                     crawler = SeoulApartmentCrawler()
                     
-                    # 먼저 작은 범위로 테스트
                     st.write("📡 API 연결 테스트 중... (1~100건)")
                     test_df = crawler.crawl_seoul_apartment_info(1, 100)
                     
@@ -809,7 +809,6 @@ if st.sidebar.button("새 데이터 생성"):
                         st.write(f"API 테스트 성공! {len(test_df)}건 수집")
                         st.write("📥 전체 데이터 수집 시작 (1000개씩 배치)...")
                         
-                        # 전체 데이터 수집 (5000개로 제한하여 시간 단축)
                         all_df = crawler.crawl_seoul_apartment_info_all(max_records=5000)
                         
                         if not all_df.empty:
@@ -817,7 +816,6 @@ if st.sidebar.button("새 데이터 생성"):
                             processed_df = crawler.process_seoul_apartment_info_data(all_df)
                             df_fresh = preprocess_apartment_df(processed_df)
 
-                            # 세션에 저장 → 새로고침 시 load_data()가 이걸 최우선 사용 (Cloud에서도 동작)
                             st.session_state[SESSION_KEY_APARTMENT_DATA] = df_fresh
 
                             try:
@@ -842,6 +840,6 @@ if st.sidebar.button("새 데이터 생성"):
                     status.update(label="❌ 오류 발생", state="error")
                     st.error(f"❌ 오류가 발생했습니다: {str(e)}")
                     st.info("💡 API 키가 설정되어 있는지 확인하거나, 샘플 데이터를 사용하세요.")
-    else:
-        st.sidebar.error("❌ 비밀번호가 올바르지 않습니다.")
+else:
+    st.sidebar.caption("비밀번호가 일치하면 버튼이 표시됩니다.")
 
