@@ -25,3 +25,20 @@ class MarketTests(unittest.TestCase):
         result = annual_activity(df, "2022-01", "2026-09")
         self.assertEqual(result["조회된 거래 건수"].tolist(), [2, 0, 0, 1])
         self.assertEqual(result["서울 시장"].tolist(), ["하락기", "하락기", "상승기", "상승기"])
+
+class ComparisonTests(unittest.TestCase):
+    def test_annualized_counts_include_zero_months(self):
+        from market_cycles import phase_comparison
+        frame = pd.DataFrame({"계약일": ["2023-07-01", "2023-08-01", "2024-01-01", "2026-01-01"]})
+        result = phase_comparison(frame, "2023-07", "2024-12").set_index("시장 국면")
+        self.assertEqual(result.loc["상승기", "비교 기간(개월)"], 12)
+        self.assertEqual(result.loc["하락기", "비교 기간(개월)"], 6)
+        self.assertEqual(result.loc["상승기", "연평균 거래 건수(연환산)"], 1)
+        self.assertEqual(result.loc["하락기", "연평균 거래 건수(연환산)"], 4)
+
+    def test_absent_phase_has_no_average(self):
+        from market_cycles import phase_comparison
+        frame = pd.DataFrame({"계약일": ["2025-01-01"]})
+        result = phase_comparison(frame, "2025-01", "2026-12").set_index("시장 국면")
+        self.assertEqual(result.loc["상승기", "비교 기간(개월)"], 12)
+        self.assertTrue(pd.isna(result.loc["하락기", "연평균 거래 건수(연환산)"]))

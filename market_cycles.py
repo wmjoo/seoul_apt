@@ -13,7 +13,7 @@ LAST_YEAR = 2025
 DOWN_YEARS = frozenset({2010, 2011, 2012, 2013, 2022, 2023})
 HISTORY_SOURCE = "https://www.dataclockkorea.com/real-estate/seoul/"
 RECENT_SOURCE = "https://www.seoul.co.kr/news/economy/estate/2026/01/27/20260127032003"
-SHADE = "rgba(125, 205, 245, 0.22)"
+SHADE = "rgba(128, 128, 128, 0.18)"
 
 
 def market_phase(year):
@@ -46,3 +46,21 @@ def annual_activity(df, start, end):
          "조회된 거래 건수": int(counts.get(year, 0))}
         for year in range(max(FIRST_YEAR, int(start[:4])), min(LAST_YEAR, int(end[:4])) + 1)
     ])
+
+
+def phase_comparison(df, start, end):
+    """Annualized counts using all selected months, including zero-trade months."""
+    months = pd.period_range(start, end, freq="M")
+    dates = pd.to_datetime(df["계약일"], errors="coerce")
+    selected = df.loc[dates.dt.to_period("M").isin(months)]
+    phases = pd.to_datetime(selected["계약일"], errors="coerce").dt.year.map(
+        lambda year: market_phase(int(year)) if pd.notna(year) else "미분류"
+    )
+    rows = []
+    for phase in ["상승기", "하락기"]:
+        duration = sum(market_phase(month.year) == phase for month in months)
+        count = int((phases == phase).sum())
+        rows.append({"시장 국면": phase, "비교 기간(개월)": duration,
+                     "거래 건수": count,
+                     "연평균 거래 건수(연환산)": round(count * 12 / duration, 2) if duration else None})
+    return pd.DataFrame(rows)

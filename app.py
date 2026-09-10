@@ -1,4 +1,4 @@
-from market_cycles import DOWN_YEARS, market_phase, shade_downturns, annual_activity, HISTORY_SOURCE, RECENT_SOURCE
+from market_cycles import DOWN_YEARS, market_phase, shade_downturns, annual_activity, phase_comparison, HISTORY_SOURCE, RECENT_SOURCE
 from trade_metadata import complex_metadata
 """
 서울 아파트 검색 앱 (Streamlit)
@@ -418,7 +418,7 @@ def _build_trade_chart(df: pd.DataFrame, title: str, ym_start: str = None, ym_en
         paper_bgcolor="white",
         plot_bgcolor="white",
         hovermode="closest",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, bgcolor="rgba(0,0,0,0)"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=1, xanchor="right", bgcolor="rgba(0,0,0,0)"),
         xaxis=xaxis,
         yaxis=dict(
             title="",
@@ -428,8 +428,6 @@ def _build_trade_chart(df: pd.DataFrame, title: str, ym_start: str = None, ym_en
             zeroline=False,
         ),
     )
-    shade_downturns(fig, ym_start or dates.min().strftime("%Y-%m"),
-                    ym_end or dates.max().strftime("%Y-%m"))
     return fig
 
 
@@ -516,7 +514,7 @@ def _build_volume_chart(df: pd.DataFrame, ym_start: str, ym_end: str, palette_ar
         paper_bgcolor="white",
         plot_bgcolor="white",
         bargap=0.18,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, bgcolor="rgba(0,0,0,0)"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=1, xanchor="right", bgcolor="rgba(0,0,0,0)"),
         xaxis=xaxis,
         yaxis=dict(
             title="건수",
@@ -672,25 +670,27 @@ def render_trade_browse(apartment_df=None) -> None:
         st.info("필터에 맞는 실거래가 없습니다. 기간이나 전용면적을 바꿔보세요.")
         return
 
-    st.caption("서울 아파트 시장 · 2006–2025 · 연간 매매가격지수 방향")
-    badges = []
-    for year in range(2006, 2026):
-        down = year in DOWN_YEARS
-        bg, color = ("#e2f3fc", "#235976") if down else ("#f4f5f7", "#586372")
-        badges.append(
-            f'<span style="padding:5px 8px;border-radius:5px;background:{bg};color:{color};'
-            f'font-size:12px;white-space:nowrap">{year} {market_phase(year)}</span>'
-        )
-    st.markdown('<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px">'
-                + "".join(badges) + '</div>', unsafe_allow_html=True)
-    down_count = int(view_df["계약일"].dt.year.isin(DOWN_YEARS).sum())
-    st.caption(f"하늘색 배경: 공통 하락 연도 · 현재 조건에서 하락기 거래 {down_count:,}건")
     with st.expander("연도별 거래 건수 · 시장 기준"):
+        st.caption("서울 아파트 시장 · 2006–2025 · 연간 매매가격지수 방향")
+        badges = []
+        for year in range(2006, 2026):
+            bg, color = ("#e5e7eb", "#374151") if year in DOWN_YEARS else ("#f4f5f7", "#586372")
+            badges.append(
+                f'<span style="padding:5px 8px;border-radius:5px;background:{bg};color:{color};'
+                f'font-size:12px;white-space:nowrap">{year} {market_phase(year)}</span>'
+            )
+        st.markdown('<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px">'
+                    + "".join(badges) + '</div>', unsafe_allow_html=True)
+        down_count = int(view_df["계약일"].dt.year.isin(DOWN_YEARS).sum())
+        st.caption(f"현재 조건에서 하락기 거래 {down_count:,}건")
         st.dataframe(annual_activity(view_df, ym_start, ym_end), hide_index=True, width="stretch")
-        st.caption("서울 전체 아파트 매매가격지수의 연간 하락 여부를 모든 단지에 공통 적용합니다. "
-                   "연중 상승·하락 전환과는 다르며, 2026년 이후는 미분류입니다. "
-                   "거래 건수는 선택한 기간·면적·층 조건과 저장된 데이터 기준입니다. "
-                   "0건은 미수집 또는 필터 결과일 수도 있습니다.")
+        st.markdown("**상승기·하락기 연평균 거래 건수 비교**")
+        st.dataframe(phase_comparison(view_df, ym_start, ym_end), hide_index=True, width="stretch")
+        st.caption("연환산 평균 = 거래 건수 ÷ 선택 기간에 포함된 해당 국면의 개월 수 × 12. "
+                   "거래가 없는 달도 포함하고, 비교 기간이 없는 국면은 평균을 표시하지 않습니다. "
+                   "2026년 이후는 미분류로 비교에서 제외합니다. "
+                   "기간·면적·층 필터와 저장된 데이터 기준이며 미수집 기간의 0건은 실제 무거래를 뜻하지 않습니다.")
+        st.caption("현재 시장 분류는 연간 기준입니다. 반기 말 지수 검증 전까지 상·하반기로 추정하지 않습니다.")
         st.markdown(f"[2006–2024 지수 자료]({HISTORY_SOURCE}) · [2025 연간 동향]({RECENT_SOURCE})")
 
     if query.get("단지") in (None, "전체"):
@@ -701,7 +701,7 @@ def render_trade_browse(apartment_df=None) -> None:
             use_container_width=True,
             config={"scrollZoom": True, "displaylogo": False},
         )
-    st.caption("추세선: 이동 중앙값 · 선 주변 음영: 이동 20~80% 분위 구간 · 배경 하늘색: 시장 하락 연도")
+    st.caption("추세선: 이동 중앙값 · 선 주변 음영: 이동 20~80% 분위 구간")
     if selected_area == "전체":
         st.caption("전용면적 전체 선택 시 서로 다른 면적의 거래가격이 함께 표시됩니다.")
     st.plotly_chart(
