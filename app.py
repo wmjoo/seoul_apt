@@ -310,21 +310,49 @@ def _apply_browse_query(df: pd.DataFrame, query: dict) -> pd.DataFrame:
     return filtered
 
 
-def _build_trade_chart(df: pd.DataFrame, title: str):
+def _period_dtick(ym_start: str, ym_end: str) -> str:
+    """기간 길이에 따라 x축 눈금: 10년 미만 3개월, 10년 6개월, 그 이상 1년."""
+    start = pd.Timestamp(f"{ym_start}-01")
+    end = pd.Timestamp(f"{ym_end}-01")
+    months = (end.year - start.year) * 12 + (end.month - start.month) + 1
+    if months > 132:
+        return "M12"
+    if months >= 120:
+        return "M6"
+    return "M3"
+
+
+def _xaxis_period(ym_start: str, ym_end: str) -> dict:
+    dtick = _period_dtick(ym_start, ym_end)
+    return dict(
+        showgrid=True,
+        gridcolor="#f0f0f0",
+        zeroline=False,
+        tickformat="%y.%m",
+        dtick=dtick,
+        ticks="outside",
+        range=[
+            pd.Timestamp(f"{ym_start}-01"),
+            pd.Timestamp(f"{ym_end}-01") + pd.offsets.MonthEnd(0),
+        ],
+    )
+
+
+def _build_trade_chart(df: pd.DataFrame, title: str, ym_start: str = None, ym_end: str = None):
     import plotly.graph_objects as go
 
     chart_df = df.dropna(subset=["계약일", "거래금액_만원"]).sort_values("계약일")
     fig = go.Figure()
     if chart_df.empty:
-        fig.update_layout(title=title, height=420, paper_bgcolor="white", plot_bgcolor="white")
+        fig.update_layout(title=title, height=300, paper_bgcolor="white", plot_bgcolor="white")
         return fig
 
     price_eok = chart_df["거래금액_만원"].astype(float) / 10000.0
     dates = chart_df["계약일"]
     hover = [
-        f"{d.strftime('%Y-%m-%d')}<br>{_format_manwon(p)} / {int(f)}층 / {a:.2f}㎡"
+        f"{d.strftime('%y.%m.%d')}<br>{_format_manwon(p)} / {int(f)}층 / {a:.2f}㎡"
         if pd.notna(f) and pd.notna(a)
-        else f"{d.strftime('%Y-%m-%d')}<br>{_format_manwon(p)}"
+        else f"{d.strftime('%y.%m.%d')}<br>{_format_manwon(p)}"
         for d, p, f, a in zip(dates, chart_df["거래금액_만원"], chart_df["층_num"], chart_df["전용면적_num"])
     ]
 
@@ -376,21 +404,123 @@ def _build_trade_chart(df: pd.DataFrame, title: str):
             hovertemplate="%{text}<extra></extra>",
         )
     )
+    xaxis = (
+        _xaxis_period(ym_start, ym_end)
+        if ym_start and ym_end
+        else dict(showgrid=True, gridcolor="#f0f0f0", zeroline=False, tickformat="%y.%m")
+    )
     fig.update_layout(
         title=dict(text=title, font=dict(size=16)),
-        height=460,
-        margin=dict(l=48, r=16, t=56, b=40),
+        height=300,
+        margin=dict(l=48, r=16, t=48, b=36),
         paper_bgcolor="white",
         plot_bgcolor="white",
         hovermode="closest",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, bgcolor="rgba(0,0,0,0)"),
-        xaxis=dict(showgrid=True, gridcolor="#f0f0f0", zeroline=False),
+        xaxis=xaxis,
         yaxis=dict(
             title="",
             ticksuffix="억",
             showgrid=True,
             gridcolor="#eeeeee",
             zeroline=False,
+        ),
+    )
+    return fig
+
+
+_VOLUME_PALETTE = [
+    "#42a5f5",
+    "#66bb6a",
+    "#ffa726",
+    "#ab47bc",
+    "#26c6da",
+    "#ef5350",
+    "#8d6e63",
+    "#d4e157",
+    "#5c6bc0",
+    "#ec407a",
+    "#78909c",
+    "#ffca28",
+]
+
+
+def _area_label(value) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "면적미상"
+    try:
+        return f"{float(value):.2f}㎡"
+    except (TypeError, ValueError):
+        return "면적미상"
+
+
+def _build_volume_chart(df: pd.DataFrame, ym_start: str, ym_end: str, palette_areas: list):
+    """월별 거래 건수. 전용면적별로 스택하고, 면적 필터와 동기화한다."""
+    import plotly.graph_objects as go
+
+    months = pd.date_range(start=f"{ym_start}-01", end=f"{ym_end}-01", freq="MS")
+    fig = go.Figure()
+    work = df.copy()
+    work["면적"] = work["전용면적_num"].map(_area_label)
+    work["월"] = pd.to_datetime(work["계약년월"].astype(str) + "-01", errors="coerce")
+    work = work.dropna(subset=["월"])
+
+    palette_labels = [_area_label(a) for a in palette_areas]
+    if (work["면적"] == "면적미상").any() and "면적미상" not in palette_labels:
+        palette_labels.append("면적미상")
+    color_map = {
+        label: _VOLUME_PALETTE[i % len(_VOLUME_PALETTE)] for i, label in enumerate(palette_labels)
+    }
+    present = [lab for lab in palette_labels if lab in set(work["면적"])]
+    if not present:
+        present = sorted(work["면적"].dropna().unique().tolist())
+
+    for lab in present:
+        counts = work.loc[work["면적"] == lab].groupby("월").size()
+        counts = counts.reindex(months, fill_value=0)
+        fig.add_trace(
+            go.Bar(
+                x=counts.index,
+                y=counts.values,
+                name=lab,
+                marker_color=color_map.get(lab, "#90a4ae"),
+                hovertemplate=f"{lab}<br>%{{x|%y.%m}}<br>%{{y}}건<extra></extra>",
+            )
+        )
+
+    totals = work.groupby("월").size().reindex(months, fill_value=0)
+    fig.add_trace(
+        go.Scatter(
+            x=totals.index,
+            y=totals.values,
+            mode="text",
+            text=[str(int(v)) if v else "" for v in totals.values],
+            textposition="top center",
+            textfont=dict(size=10, color="#424242"),
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+    ymax = float(totals.max()) if len(totals) else 0.0
+    xaxis = _xaxis_period(ym_start, ym_end)
+    xaxis["showgrid"] = False
+    fig.update_layout(
+        title=dict(text="월별 거래 건수", font=dict(size=16)),
+        barmode="stack",
+        height=280,
+        margin=dict(l=48, r=16, t=64, b=36),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        bargap=0.18,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, bgcolor="rgba(0,0,0,0)"),
+        xaxis=xaxis,
+        yaxis=dict(
+            title="건수",
+            showgrid=True,
+            gridcolor="#eeeeee",
+            rangemode="tozero",
+            zeroline=False,
+            range=[0, ymax * 1.22 if ymax else 1],
         ),
     )
     return fig
@@ -471,7 +601,7 @@ def render_trade_browse() -> None:
         return
 
     default_end = ym_options[-1]
-    cut = (pd.Timestamp(default_end + "-01") - pd.DateOffset(years=5)).strftime("%Y-%m")
+    cut = (pd.Timestamp(default_end + "-01") - pd.DateOffset(years=10)).strftime("%Y-%m")
     default_start = next((x for x in ym_options if x >= cut), ym_options[0])
     query_key = f"{query.get('구')}_{query.get('동')}_{query.get('단지')}"
     if len(ym_options) == 1:
@@ -482,7 +612,7 @@ def render_trade_browse() -> None:
             "기간",
             options=ym_options,
             value=(default_start, default_end),
-            key=f"browse_ym_range_{query_key}",
+            key=f"browse_ym_range_{query_key}_10y",
         )
 
     period_df = result_df[(result_df["계약년월"] >= ym_start) & (result_df["계약년월"] <= ym_end)]
@@ -522,10 +652,15 @@ def render_trade_browse() -> None:
         st.caption("단지를 선택해 검색하면 시세 점·추세 차트가 표시됩니다.")
     else:
         st.plotly_chart(
-            _build_trade_chart(view_df, f"{apt_title} 매매 실거래가"),
+            _build_trade_chart(view_df, f"{apt_title} 매매 실거래가", ym_start, ym_end),
             use_container_width=True,
             config={"scrollZoom": True, "displaylogo": False},
         )
+    st.plotly_chart(
+        _build_volume_chart(view_df, ym_start, ym_end, areas),
+        use_container_width=True,
+        config={"scrollZoom": True, "displaylogo": False},
+    )
 
     show_cols = [
         c
