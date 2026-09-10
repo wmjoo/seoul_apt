@@ -1,3 +1,4 @@
+from trade_controls import period_control, date_bounds, area_values, grouped_chart_frame, area_label
 from trade_compare import render_trade_compare
 from market_cycles import DOWN_YEARS, half_phase, market_phase, shade_downturns, annual_activity, phase_comparison, HISTORY_SOURCE
 from trade_metadata import complex_metadata
@@ -23,11 +24,9 @@ from crawler import SeoulApartmentCrawler
 from config import SEOUL_DISTRICTS
 from molit_trades import (
     collect_trades,
-    current_ym,
     has_molit_api_key,
     load_trade_history,
     load_tracked_districts,
-    months_back,
     save_tracked_districts,
     ym_to_date_span,
 )
@@ -452,15 +451,6 @@ _VOLUME_PALETTE = [
 ]
 
 
-def _area_label(value) -> str:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return "면적미상"
-    try:
-        return f"{float(value):.2f}㎡"
-    except (TypeError, ValueError):
-        return "면적미상"
-
-
 def _build_volume_chart(df: pd.DataFrame, ym_start: str, ym_end: str, palette_areas: list):
     """월별 거래 건수. 전용면적별로 스택하고, 면적 필터와 동기화한다."""
     import plotly.graph_objects as go
@@ -468,11 +458,11 @@ def _build_volume_chart(df: pd.DataFrame, ym_start: str, ym_end: str, palette_ar
     months = pd.date_range(start=f"{ym_start}-01", end=f"{ym_end}-01", freq="MS")
     fig = go.Figure()
     work = df.copy()
-    work["면적"] = work["전용면적_num"].map(_area_label)
+    work["면적"] = work["전용면적_num"].map(area_label)
     work["월"] = pd.to_datetime(work["계약년월"].astype(str) + "-01", errors="coerce")
     work = work.dropna(subset=["월"])
 
-    palette_labels = [_area_label(a) for a in palette_areas]
+    palette_labels = [area_label(a) for a in palette_areas]
     if (work["면적"] == "면적미상").any() and "면적미상" not in palette_labels:
         palette_labels.append("면적미상")
     color_map = {
@@ -621,42 +611,26 @@ def render_trade_browse(apartment_df=None) -> None:
             st.caption("단지 정보")
             st.dataframe(metadata, hide_index=True, use_container_width=True)
 
-    ym_options = sorted(x for x in result_df["계약년월"].dropna().unique() if x)
-    if not ym_options:
-        st.warning("계약일 정보가 없어 기간을 선택할 수 없습니다.")
-        return
-
-    ym_options = pd.period_range(ym_options[0], ym_options[-1], freq="M").astype(str).tolist()
-    default_end = ym_options[-1]
-    cut = (pd.Timestamp(default_end + "-01") - pd.DateOffset(months=119)).strftime("%Y-%m")
-    default_start = next((x for x in ym_options if x >= cut), ym_options[0])
     query_key = f"{query.get('구')}_{query.get('동')}_{query.get('단지')}"
-    if len(ym_options) == 1:
-        ym_start = ym_end = ym_options[0]
-        st.caption(f"기간 {ym_start}")
-    else:
-        ym_start, ym_end = st.select_slider(
-            "기간",
-            options=ym_options,
-            value=(default_start, default_end),
-            key=f"browse_ym_range_{query_key}_10y",
-        )
-
-    period_df = result_df[(result_df["계약년월"] >= ym_start) & (result_df["계약년월"] <= ym_end)]
-    areas = sorted({float(a) for a in result_df["전용면적_num"].dropna().unique()})
-    area_labels = ["전체"] + [f"{a:.2f}㎡" for a in areas]
+    ym_start, ym_end = period_control(f"browse_period_{query_key}")
+    left, right = date_bounds(ym_start, ym_end)
+    period_df = result_df[result_df["계약일"].between(left, right + pd.Timedelta(days=1), inclusive="left")]
+    grouped = st.radio("전용면적 표시", ["소수점 구분", "동일 전용면적 묶기"],
+                       horizontal=True, key=f"browse_group_{query_key}") == "동일 전용면적 묶기"
+    areas = sorted(area_values(result_df, grouped).dropna().unique())
+    area_labels = ["전체"] + [area_label(a, grouped) for a in areas]
     area_default = "전체"
     if areas:
-        mode_area = result_df["전용면적_num"].mode()
+        mode_area = area_values(result_df, grouped).mode()
         if len(mode_area) > 0:
-            area_default = f"{float(mode_area.iloc[0]):.2f}㎡"
+            area_default = area_label(mode_area.iloc[0], grouped)
     fcol, ccol = st.columns([2, 3])
     with fcol:
         selected_area = st.selectbox(
             "전용면적",
             area_labels,
             index=area_labels.index(area_default) if area_default in area_labels else 0,
-            key=f"browse_area_{query_key}",
+            key=f"browse_area_{query_key}_{grouped}",
         )
     with ccol:
         st.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
@@ -665,7 +639,7 @@ def render_trade_browse(apartment_df=None) -> None:
     view_df = period_df
     if selected_area != "전체":
         area_num = float(selected_area.replace("㎡", ""))
-        view_df = view_df[view_df["전용면적_num"] == area_num]
+        view_df = view_df[area_values(view_df, grouped) == area_num]
     if exclude_first:
         view_df = view_df[view_df["층_num"].fillna(-999) != 1]
 
@@ -710,7 +684,7 @@ def render_trade_browse(apartment_df=None) -> None:
     if selected_area == "전체":
         st.caption("전용면적 전체 선택 시 서로 다른 면적의 거래가격이 함께 표시됩니다.")
     st.plotly_chart(
-        _build_volume_chart(view_df, ym_start, ym_end, areas),
+        _build_volume_chart(grouped_chart_frame(view_df) if grouped else view_df, ym_start, ym_end, areas),
         use_container_width=True,
         config={"scrollZoom": True, "displaylogo": False},
     )
@@ -806,7 +780,7 @@ def render_trade_tracker(apartment_df: pd.DataFrame = None) -> None:
     st.markdown("#### 수집")
     can_collect = has_molit_api_key() and bool(tracked)
 
-    def _run_collect(start_ym: str, skip_complete_months: bool) -> None:
+    def _run_collect(start_ym: str, end_ym: str, skip_complete_months: bool) -> None:
         bar = st.progress(0, text="수집 시작")
         last_toast_year = None
 
@@ -823,7 +797,6 @@ def render_trade_tracker(apartment_df: pd.DataFrame = None) -> None:
                 st.toast(f"{msg} ({done}/{total})")
                 last_toast_year = year
 
-        end_ym = current_ym()
         merged = collect_trades(
             tracked,
             start_ym=start_ym,
@@ -843,42 +816,15 @@ def render_trade_tracker(apartment_df: pd.DataFrame = None) -> None:
         st.toast(f"[{start_d}~{end_d}] {added:,}건 수집완료")
         st.rerun()
 
-    c_all, c_3y, c_1y, c_6m, c_3m = st.columns(5)
-    with c_all:
-        if st.button("전체", width="stretch", disabled=not can_collect, key="tracker_collect_all"):
-            try:
-                _run_collect("200601", skip_complete_months=True)
-            except Exception as exc:
-                st.error(str(exc))
-    with c_3y:
-        if st.button("최근 3년", width="stretch", disabled=not can_collect, key="tracker_collect_3y"):
-            try:
-                _run_collect(months_back(36), skip_complete_months=True)
-            except Exception as exc:
-                st.error(str(exc))
-    with c_1y:
-        if st.button("최근 1년", width="stretch", disabled=not can_collect, key="tracker_collect_1y"):
-            try:
-                _run_collect(months_back(12), skip_complete_months=True)
-            except Exception as exc:
-                st.error(str(exc))
-    with c_6m:
-        if st.button("최근 6개월", width="stretch", disabled=not can_collect, key="tracker_collect_6m"):
-            try:
-                _run_collect(months_back(6), skip_complete_months=False)
-            except Exception as exc:
-                st.error(str(exc))
-    with c_3m:
-        if st.button("최근 3개월", width="stretch", disabled=not can_collect, key="tracker_collect_3m"):
-            try:
-                _run_collect(months_back(3), skip_complete_months=False)
-            except Exception as exc:
-                st.error(str(exc))
-    if can_collect:
-        st.caption(
-            "전체·최근 3년·최근 1년은 월 종료 후 수집·저장이 완료된 구·월을 건너뜁니다. "
-            "최근 6개월·최근 3개월은 항상 다시 수집합니다."
-        )
+    selected_start, selected_end = period_control("tracker_period")
+    duration = (pd.Period(selected_end, freq="M") - pd.Period(selected_start, freq="M")).n + 1
+    skip_complete = duration > 6
+    if st.button("선택 기간 수집", width="stretch", disabled=not can_collect, key="tracker_collect_selected"):
+        try:
+            _run_collect(selected_start.replace("-", ""), selected_end.replace("-", ""), skip_complete)
+        except Exception as exc:
+            st.error(str(exc))
+    st.caption("6개월 이하의 기간은 다시 수집합니다. 더 긴 기간은 수집·저장이 완료된 구·월을 건너뜁니다.")
     if not can_collect:
         if not has_molit_api_key():
             st.caption("국토부 API 키가 연결되면 수집할 수 있습니다.")
@@ -1489,7 +1435,7 @@ if len(filtered_df) > 0:
     with tab4:
         render_trade_browse(df)
     with tab6:
-        render_trade_compare(get_cached_trades, _prepare_browse_trades, _build_trade_chart, _build_volume_chart)
+        render_trade_compare(get_cached_trades, _prepare_browse_trades, _build_trade_chart, _build_volume_chart, df)
     with tab5:
         render_tracker_tab(df)
 else:
@@ -1504,7 +1450,7 @@ else:
     with tab4:
         render_trade_browse(df)
     with tab6:
-        render_trade_compare(get_cached_trades, _prepare_browse_trades, _build_trade_chart, _build_volume_chart)
+        render_trade_compare(get_cached_trades, _prepare_browse_trades, _build_trade_chart, _build_volume_chart, df)
     with tab5:
         render_tracker_tab(df)
 
