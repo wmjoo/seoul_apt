@@ -11,6 +11,7 @@ import re
 import time
 import urllib.parse
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 from xml.etree import ElementTree as ET
 
@@ -98,12 +99,12 @@ def month_range(start_ym: str, end_ym: str) -> List[str]:
 
 
 def current_ym() -> str:
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
     return f"{now.year:04d}{now.month:02d}"
 
 
 def months_back(n: int) -> str:
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
     y, m = now.year, now.month - (max(n, 1) - 1)
     while m <= 0:
         m += 12
@@ -116,7 +117,7 @@ def ym_to_date_span(start_ym: str, end_ym: str) -> tuple:
     start = f"{int(start_ym[:4]):04d}-{int(start_ym[4:]):02d}-01"
     ey, em = int(end_ym[:4]), int(end_ym[4:])
     last = calendar.monthrange(ey, em)[1]
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
     if ey == now.year and em == now.month:
         last = min(last, now.day)
     end = f"{ey:04d}-{em:02d}-{last:02d}"
@@ -206,6 +207,8 @@ class MolitTradeClient:
             code = _find_text(root, "resultCode")
             msg = _find_text(root, "resultMsg")
             if code in ("03",):
+                if items:
+                    raise RuntimeError("월별 조회가 중간에 종료되었습니다. 저장하지 않습니다.")
                 break
             if code and code not in ("00", "000", "0000"):
                 raise RuntimeError(msg or f"API 오류 코드 {code}")
@@ -213,8 +216,14 @@ class MolitTradeClient:
             items.extend(page_items)
             if total is None:
                 total_raw = _find_text(root, "totalCount")
-                total = int(total_raw) if total_raw.isdigit() else len(page_items)
-            if not page_items or len(items) >= total:
+                if not total_raw.isdigit():
+                    raise RuntimeError("API 응답의 전체 건수를 확인할 수 없어 저장하지 않습니다.")
+                total = int(total_raw)
+            if not page_items and len(items) < total:
+                raise RuntimeError("API 페이지가 누락되어 저장하지 않습니다.")
+            if len(items) >= total:
+                if len(items) != total:
+                    raise RuntimeError("API 전체 건수와 받은 건수가 달라 저장하지 않습니다.")
                 break
             page += 1
             time.sleep(MOLIT_REQUEST_DELAY)
@@ -276,62 +285,49 @@ def save_trade_history(df: pd.DataFrame, path: str = TRADE_HISTORY_CSV) -> None:
     df.to_csv(path, index=False, encoding="utf-8-sig")
 
 
-def district_month_days(df: pd.DataFrame) -> Dict[Tuple[str, str], Set[int]]:
-    """시트/CSV의 (구, YYYYMM)별 계약 일자 집합."""
-    if df is None or df.empty or "구" not in df.columns:
-        return {}
-    y = m = d = None
-    if all(c in df.columns for c in ("년", "월", "일")):
-        y = pd.to_numeric(df["년"], errors="coerce")
-        m = pd.to_numeric(df["월"], errors="coerce")
-        d = pd.to_numeric(df["일"], errors="coerce")
-    if (y is None or y.isna().all()) and "계약일" in df.columns:
-        dt = pd.to_datetime(df["계약일"], errors="coerce")
-        y, m, d = dt.dt.year, dt.dt.month, dt.dt.day
-    if y is None:
-        return {}
-    work = pd.DataFrame(
-        {
-            "구": df["구"].astype(str).str.strip(),
-            "_y": y,
-            "_m": m,
-            "_d": d,
-        }
-    ).dropna()
-    if work.empty:
-        return {}
-    work["_ym"] = work["_y"].astype(int).map("{:04d}".format) + work["_m"].astype(int).map("{:02d}".format)
-    out: Dict[Tuple[str, str], Set[int]] = {}
-    for (gu, ym), part in work.groupby(["구", "_ym"], sort=False):
-        out[(str(gu), str(ym))] = set(int(x) for x in part["_d"].tolist())
-    return out
+def load_collection_log():
+    from sheets_store import is_sheets_configured, _read_df
+    if is_sheets_configured():
+        return _read_df("collection_log")
+    if os.path.exists("collection_log.csv"):
+        return pd.read_csv("collection_log.csv", dtype=str)
+    return pd.DataFrame(columns=["구", "연월", "수집시각", "건수"])
 
 
-def is_month_span_complete(days: Set[int], ym: str) -> bool:
-    """해당 월 데이터가 1일부터 말일까지 걸쳐 있으면 True."""
-    if not days or not ym or len(ym) != 6:
-        return False
-    last = calendar.monthrange(int(ym[:4]), int(ym[4:]))[1]
-    return min(days) == 1 and max(days) == last
+def save_collection_log(log):
+    from sheets_store import is_sheets_configured, _write_df
+    if is_sheets_configured():
+        _write_df("collection_log", log)
+    else:
+        log.to_csv("collection_log.csv", index=False, encoding="utf-8-sig")
 
 
-def _dedupe_trades(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-    keys = [c for c in ["구", "아파트명", "지번", "계약일", "층", "전용면적", "거래금액_만원"] if c in df.columns]
-    if not keys:
-        return df.drop_duplicates()
-    return df.drop_duplicates(subset=keys, keep="last")
+def completed_months(log):
+    complete = set()
+    for _, row in log.iterrows():
+        ym = str(row.get("연월", ""))
+        try:
+            next_month = pd.Timestamp(ym[:4] + "-" + ym[4:] + "-01") + pd.offsets.MonthBegin(1)
+            collected = pd.Timestamp(row["수집시각"])
+            if collected >= next_month:
+                complete.add((str(row["구"]), ym))
+        except (ValueError, TypeError, KeyError):
+            continue
+    return complete
 
 
-def _merge_rows(existing: pd.DataFrame, new_rows: List[Dict]) -> pd.DataFrame:
-    new_df = pd.DataFrame(new_rows)
-    merged = pd.concat([existing, new_df], ignore_index=True) if not existing.empty else new_df
-    if merged.empty:
-        return merged
-    merged = _dedupe_trades(merged)
-    if "계약일" in merged.columns:
-        merged = merged.sort_values(["계약일", "구", "아파트명"], ascending=[False, True, True], na_position="last")
+def replace_collected_months(existing, rows, jobs):
+    """Replace only successfully fetched months; preserve identical real transactions."""
+    if existing.empty:
+        kept = existing
+    else:
+        dates = pd.to_datetime(existing["계약일"], errors="coerce")
+        keys = list(zip(existing["구"].astype(str), dates.dt.strftime("%Y%m")))
+        kept = existing.loc[[key not in jobs for key in keys]]
+    fresh = pd.DataFrame(rows)
+    merged = pd.concat([kept, fresh], ignore_index=True)
+    if not merged.empty:
+        merged = merged.sort_values(["계약일", "구", "아파트명"], ascending=[False, True, True])
     return merged
 
 
@@ -369,10 +365,13 @@ def collect_trades(
     existing = load_trade_history()
     jobs = [(d, ym) for d in district_list for ym in months]
     total = len(jobs)
-    complete_days = district_month_days(existing) if skip_complete_months else {}
+    log = load_collection_log()
+    complete = completed_months(log) if skip_complete_months else set()
+    fetched = set()
+    records = []
 
     for i, (district, ym) in enumerate(jobs, start=1):
-        if skip_complete_months and is_month_span_complete(complete_days.get((district, ym), set()), ym):
+        if (district, ym) in complete:
             if on_progress:
                 on_progress(i, total, f"{district} {ym[:4]}.{ym[4:]} 생략")
             continue
@@ -380,17 +379,26 @@ def collect_trades(
             on_progress(i - 1, total, f"{district} {ym[:4]}.{ym[4:]} 조회 중")
         items = client.fetch_month(SEOUL_LAWD_CD[district], ym)
         buffer.extend(_item_to_row(item, district) for item in items)
+        fetched.add((district, ym))
+        records.append({"구": district, "연월": ym,
+                        "수집시각": datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None).isoformat(), "건수": len(items)})
         time.sleep(MOLIT_REQUEST_DELAY)
 
-    if not buffer:
+    if not fetched:
         if on_progress:
             on_progress(total, total, "건너뛴 연월만 있어 저장하지 않습니다")
         return existing
 
     if on_progress:
         on_progress(total, total, "시트 저장 중...")
-    merged = _merge_rows(existing, buffer)
+    merged = replace_collected_months(existing, buffer, fetched)
     save_trade_history(merged)
+    # Mark completion only after the data write succeeds. Failure here causes a safe refetch.
+    log = pd.concat([log, pd.DataFrame(records)], ignore_index=True)
+    log["연월"] = log["연월"].astype(str)
+    log = log.drop_duplicates(["구", "연월"], keep="last")
+    save_collection_log(log)
+    merged.attrs["collected_count"] = len(buffer)
     if on_progress:
         on_progress(total, total, f"저장 완료 ({len(merged)}건)")
     return merged

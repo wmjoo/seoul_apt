@@ -1,3 +1,4 @@
+from trade_metadata import complex_metadata
 """
 서울 아파트 검색 앱 (Streamlit)
 """
@@ -526,8 +527,14 @@ def _build_volume_chart(df: pd.DataFrame, ym_start: str, ym_end: str, palette_ar
     return fig
 
 
-def render_trade_browse() -> None:
-    """로그인 없이 실거래 내역을 조회한다."""
+def render_trade_browse(apartment_df=None) -> None:
+    """로그인 후 실거래 내역을 조회한다."""
+    if not is_tracker_logged_in():
+        render_tracker_login_panel("실거래가 조회", "browse")
+        return
+    if st.button("로그아웃", key="browse_logout"):
+        logout_tracker()
+        st.rerun()
     st.subheader("실거래가 조회")
     refresh = st.button("최신 데이터 불러오기", key="browse_refresh")
     try:
@@ -544,7 +551,7 @@ def render_trade_browse() -> None:
     apt_col = _apt_col(trades_df)
     gu_values = _unique_labels(trades_df["구"]) if "구" in trades_df.columns else []
     gu_options = ["전체"] + gu_values
-    default_gu = "동대문구" if "동대문구" in gu_values else (gu_values[0] if gu_values else "전체")
+    default_gu = "성북구" if "성북구" in gu_values else (gu_values[0] if gu_values else "전체")
 
     gcol, dcol, acol, bcol = st.columns([2.3, 2.3, 3.1, 0.9])
     with gcol:
@@ -564,7 +571,7 @@ def render_trade_browse() -> None:
         selected_dong = st.selectbox(
             "동",
             dong_options,
-            index=0,
+            index=dong_options.index("종암동") if selected_gu == "성북구" and "종암동" in dong_options else 0,
             key=f"browse_dong_filter_{selected_gu}",
         )
     dong_df = gu_df if selected_dong == "전체" or not dong_col else gu_df[
@@ -577,14 +584,14 @@ def render_trade_browse() -> None:
         selected_apt = st.selectbox(
             "단지명",
             apt_options,
-            index=0,
+            index=apt_options.index("종암에스케이") if selected_gu == "성북구" and selected_dong == "종암동" and "종암에스케이" in apt_options else 0,
             key=f"browse_apt_filter_{selected_gu}_{selected_dong}",
         )
     with bcol:
         st.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
         searched = st.button("검색", width="stretch", key="browse_search_btn")
 
-    if searched:
+    if searched or SESSION_KEY_BROWSE_QUERY not in st.session_state:
         st.session_state[SESSION_KEY_BROWSE_QUERY] = {
             "구": selected_gu,
             "동": selected_dong,
@@ -601,6 +608,12 @@ def render_trade_browse() -> None:
     if result_df.empty:
         st.warning("조건에 맞는 실거래가 없습니다.")
         return
+
+    if query.get("단지") != "전체":
+        metadata = complex_metadata(result_df, apartment_df)
+        if not metadata.empty:
+            st.caption("단지 정보")
+            st.dataframe(metadata, hide_index=True, use_container_width=True)
 
     ym_options = sorted(x for x in result_df["계약년월"].dropna().unique() if x)
     if not ym_options:
@@ -664,6 +677,9 @@ def render_trade_browse() -> None:
             use_container_width=True,
             config={"scrollZoom": True, "displaylogo": False},
         )
+    st.caption("추세선: 거래 순서 기준 이동 중앙값 · 음영: 이동 20~80% 분위 구간")
+    if selected_area == "전체":
+        st.caption("전용면적 전체 선택 시 서로 다른 면적의 거래가격이 함께 표시됩니다.")
     st.plotly_chart(
         _build_volume_chart(view_df, ym_start, ym_end, areas),
         use_container_width=True,
@@ -778,8 +794,6 @@ def render_trade_tracker(apartment_df: pd.DataFrame = None) -> None:
                 st.toast(f"{msg} ({done}/{total})")
                 last_toast_year = year
 
-        existing = get_cached_trades()
-        before = 0 if existing.empty else len(existing)
         end_ym = current_ym()
         merged = collect_trades(
             tracked,
@@ -788,7 +802,7 @@ def render_trade_tracker(apartment_df: pd.DataFrame = None) -> None:
             on_progress=on_progress,
             skip_complete_months=skip_complete_months,
         )
-        added = max(0, len(merged) - before)
+        added = merged.attrs.get("collected_count", 0)
         start_d, end_d = ym_to_date_span(start_ym, end_ym)
         st.session_state[SESSION_KEY_TRADES_CACHE] = merged
         st.session_state[SESSION_KEY_COLLECT_BANNER] = {
@@ -833,7 +847,7 @@ def render_trade_tracker(apartment_df: pd.DataFrame = None) -> None:
                 st.error(str(exc))
     if can_collect:
         st.caption(
-            "전체·최근 3년·최근 1년은 시트에 해당 구의 해당 월 1일~말일 데이터가 있으면 건너뜁니다. "
+            "전체·최근 3년·최근 1년은 월 종료 후 수집·저장이 완료된 구·월을 건너뜁니다. "
             "최근 6개월·최근 3개월은 항상 다시 수집합니다."
         )
     if not can_collect:
@@ -918,11 +932,22 @@ if not os.path.exists(_main_apt_file):
         pass
 df = enrich_with_main_apt(df, _main_apt_file)
 
+st.markdown("""
+<style>
+.block-container {padding-top:1.5rem; padding-bottom:2rem;}
+[data-testid="stVerticalBlock"] {gap:0.65rem;}
+h2 {font-size:1.3rem !important;} h3 {font-size:1.1rem !important;}
+[data-testid="stMetricValue"] {font-size:1.45rem;}
+button {border-radius:6px !important;}
+</style>
+""", unsafe_allow_html=True)
+
+list_filters = st.sidebar.expander("목록·지도 검색 필터", expanded=False)
 # 사이드바 필터
-st.sidebar.header("🔍 검색 필터")
+list_filters.header("🔍 검색 필터")
 
 # 초기화 버튼 (자치구 제외하고 모든 필터 초기화)
-if st.sidebar.button("🔄 필터 초기화", width="stretch"):
+if list_filters.button("🔄 필터 초기화", width="stretch"):
     # 필터 관련 session_state 키들 초기화 (자치구 제외)
     filter_keys = ['dong', 'year_range', 'household', 'hallway', 'distance', 'subway']
     for key in filter_keys:
@@ -931,7 +956,7 @@ if st.sidebar.button("🔄 필터 초기화", width="stretch"):
     st.rerun()
 
 # 자치구와 동 필터 (병렬 배치)
-col_district, col_dong = st.sidebar.columns(2)
+col_district, col_dong = list_filters.columns(2)
 
 with col_district:
     districts_list = df["자치구"].dropna().unique().tolist()
@@ -968,7 +993,7 @@ if len(year_data) > 0:
     max_year = int(year_data.max())
     # 초기화 시 전체 범위로
     default_year_range = (min_year, max_year)
-    year_range = st.sidebar.slider(
+    year_range = list_filters.slider(
         "건축연도 범위",
         min_value=min_year,
         max_value=max_year,
@@ -986,7 +1011,7 @@ if len(household_data) > 0:
     max_household = int(household_data.max())
     default_household_low = min(max(300, min_household), max_household)
     default_household_range = (default_household_low, max_household)
-    household_range = st.sidebar.slider(
+    household_range = list_filters.slider(
         "세대수 범위",
         min_value=min_household,
         max_value=max_household,
@@ -1001,7 +1026,7 @@ else:
 hallway_types_list = filter_base["복도계단식"].dropna().unique().tolist()
 hallway_types = ["전체"] + sorted([str(x) for x in hallway_types_list if pd.notna(x)])
 # 초기화 시 "전체"로
-selected_hallway = st.sidebar.selectbox("복도/계단식", hallway_types, index=0, key="hallway")
+selected_hallway = list_filters.selectbox("복도/계단식", hallway_types, index=0, key="hallway")
 
 # 평형 필터 제거 (사용자 요청)
 
@@ -1012,7 +1037,7 @@ if len(distance_data) > 0:
     max_distance = float(distance_data.max())
     # 초기화 시 전체 범위로
     default_distance_range = (min_distance, max_distance)
-    distance_range = st.sidebar.slider(
+    distance_range = list_filters.slider(
         "지하철역 거리 범위 (km)",
         min_value=min_distance,
         max_value=max_distance,
@@ -1041,7 +1066,7 @@ subway_stations = ["전체"] + sorted(
     key=lambda x: x  # 한글은 기본 정렬로 가나다순 정렬됨
 )
 # 초기화 시 "전체"로
-selected_subway = st.sidebar.selectbox("가장 가까운 지하철역", subway_stations, index=0, key="subway")
+selected_subway = list_filters.selectbox("가장 가까운 지하철역", subway_stations, index=0, key="subway")
 
 # 필터 적용
 filtered_df = df.copy()
@@ -1086,7 +1111,7 @@ if selected_subway != "전체":
     filtered_df = filtered_df[filtered_df["가장가까운지하철역"] == selected_subway]
 
 # 결과 표시
-st.write(f"📊 검색 결과: {len(filtered_df)}개")
+
 
 MAIN_TABS = ["📋 목록", "🗺️ 지도", "📈 통계", "🔎 실거래가 조회", "🔒 실거래가 크롤링"]
 
@@ -1433,7 +1458,7 @@ if len(filtered_df) > 0:
                 )
 
     with tab4:
-        render_trade_browse()
+        render_trade_browse(df)
     with tab5:
         render_tracker_tab(df)
 else:
@@ -1446,7 +1471,7 @@ else:
     with tab3:
         st.info("검색 결과가 없습니다. 필터를 조정해주세요.")
     with tab4:
-        render_trade_browse()
+        render_trade_browse(df)
     with tab5:
         render_tracker_tab(df)
 

@@ -87,9 +87,9 @@ def logout_tracker() -> None:
     st.session_state.pop(SESSION_KEY_TRACKER_USER, None)
 
 
-def render_tracker_login_panel() -> None:
+def render_tracker_login_panel(title="실거래가 크롤링", prefix="tracker") -> None:
     """실거래 트래커 탭 안에 로그인 폼을 그립니다."""
-    st.subheader("실거래가 크롤링")
+    st.subheader(title)
     st.caption("이 탭은 허용된 계정만 사용할 수 있습니다.")
     users = get_tracker_users()
 
@@ -97,9 +97,9 @@ def render_tracker_login_panel() -> None:
         st.warning("secrets.toml의 `[tracker_users]`에 계정을 추가하면 로그인할 수 있습니다.")
         return
 
-    with st.form("tracker_login_form", clear_on_submit=True):
-        username = st.text_input("아이디", key="tracker_login_id")
-        password = st.text_input("비밀번호", type="password", key="tracker_login_pw")
+    with st.form(f"{prefix}_login_form", clear_on_submit=True):
+        username = st.text_input("아이디", key=f"{prefix}_login_id")
+        password = st.text_input("비밀번호", type="password", key=f"{prefix}_login_pw")
         if st.form_submit_button("로그인", use_container_width=True):
             if login_tracker(username, password):
                 st.rerun()
