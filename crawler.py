@@ -58,7 +58,7 @@ class SeoulApartmentCrawler:
             print("   config.py 파일에서 PUBLIC_DATA_API_KEY를 확인하세요.")
             return False
         
-        print(f"📝 API 키 확인: {self.api_key[:20]}... (처음 20자)")
+        print("API 키가 설정되어 있습니다.")
         
         # 간단한 테스트 요청 (서울시 강남구, 2024년 1월)
         try:
@@ -92,7 +92,7 @@ class SeoulApartmentCrawler:
             return False
         except Exception as e:
             print(f"❌ API 테스트 중 오류 발생: {type(e).__name__}")
-            print(f"   오류 내용: {str(e)[:200]}")
+            print(f"   오류 유형: {type(e).__name__}")
             return False
     
     def crawl_public_data(self, district: str, year: int = 2024) -> List[Dict]:
@@ -186,7 +186,7 @@ class SeoulApartmentCrawler:
                 
         except Exception as e:
             print(f"❌ 서울 열린데이터광장 크롤링 오류: {type(e).__name__}")
-            print(f"   오류 내용: {str(e)[:200]}")
+            print(f"   오류 유형: {type(e).__name__}")
             return pd.DataFrame()
     
     def crawl_seoul_real_estate_all(self, max_records: int = 10000) -> pd.DataFrame:
@@ -388,7 +388,7 @@ class SeoulApartmentCrawler:
                 
         except Exception as e:
             print(f"❌ 서울 열린데이터광장 아파트 정보 크롤링 오류: {type(e).__name__}")
-            print(f"   오류 내용: {str(e)[:200]}")
+            print(f"   오류 유형: {type(e).__name__}")
             return pd.DataFrame()
     
     def crawl_seoul_apartment_info_all(self, max_records: int = 10000) -> pd.DataFrame:
@@ -772,7 +772,7 @@ class SeoulApartmentCrawler:
                     
             except Exception as e:
                 print(f"❌ 다운로드 오류: {type(e).__name__}")
-                print(f"   오류 내용: {str(e)[:200]}")
+                print(f"   오류 유형: {type(e).__name__}")
                 driver.quit()
                 return None
                 
@@ -782,7 +782,7 @@ class SeoulApartmentCrawler:
             return None
         except Exception as e:
             print(f"❌ Selenium 초기화 오류: {type(e).__name__}")
-            print(f"   오류 내용: {str(e)[:200]}")
+            print(f"   오류 유형: {type(e).__name__}")
             return None
     
     def download_seoul_apartment_csv(self) -> str:
@@ -831,7 +831,7 @@ class SeoulApartmentCrawler:
                 
         except Exception as e:
             print(f"❌ 다운로드 시도 오류: {type(e).__name__}")
-            print(f"   오류 내용: {str(e)[:200]}")
+            print(f"   오류 유형: {type(e).__name__}")
             return None
     
     def crawl_seoul_apartment_info_from_web(self, max_pages: int = 100) -> pd.DataFrame:
@@ -873,7 +873,7 @@ class SeoulApartmentCrawler:
             
         except Exception as e:
             print(f"❌ 웹 크롤링 오류: {type(e).__name__}")
-            print(f"   오류 내용: {str(e)[:200]}")
+            print(f"   오류 유형: {type(e).__name__}")
             return pd.DataFrame()
     
     def crawl_seoul_apartment_info_all_with_csv(self, csv_file_path: str = None) -> pd.DataFrame:
@@ -1078,7 +1078,7 @@ class SeoulApartmentCrawler:
             return pd.DataFrame()
         except Exception as e:
             print(f"❌ CSV 파일 로드 오류: {type(e).__name__}")
-            print(f"   오류 내용: {str(e)[:200]}")
+            print(f"   오류 유형: {type(e).__name__}")
             return pd.DataFrame()
 
 

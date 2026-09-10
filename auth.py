@@ -77,7 +77,7 @@ def login_tracker(username: str, password: str) -> bool:
     expected = users.get(user)
     if expected is None:
         return False
-    if not hmac.compare_digest(str(expected), pw):
+    if not hmac.compare_digest(str(expected).encode("utf-8"), pw.encode("utf-8")):
         return False
     st.session_state[SESSION_KEY_TRACKER_USER] = user
     return True
@@ -97,10 +97,10 @@ def render_tracker_login_panel() -> None:
         st.warning("secrets.toml의 `[tracker_users]`에 계정을 추가하면 로그인할 수 있습니다.")
         return
 
-    with st.container():
+    with st.form("tracker_login_form", clear_on_submit=True):
         username = st.text_input("아이디", key="tracker_login_id")
         password = st.text_input("비밀번호", type="password", key="tracker_login_pw")
-        if st.button("로그인", width="stretch", key="tracker_login_btn"):
+        if st.form_submit_button("로그인", use_container_width=True):
             if login_tracker(username, password):
                 st.rerun()
             else:

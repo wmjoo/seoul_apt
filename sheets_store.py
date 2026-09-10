@@ -87,7 +87,8 @@ def _with_sheets_retry(fn: Callable, retries: int = 6):
             text = str(exc)
             if "429" not in text and "Quota exceeded" not in text:
                 raise
-            time.sleep(min(65, 10 * (i + 1)))
+            if i < retries - 1:
+                time.sleep(min(60, 10 * (i + 1)))
     raise RuntimeError("Google Sheets 분당 호출 한도를 넘었습니다. 1분 뒤 다시 시도하세요.") from last
 
 
@@ -121,12 +122,14 @@ def spreadsheet_url() -> str:
 
 
 def _worksheet(title: str, cols: int = 20):
+    from gspread.exceptions import WorksheetNotFound
+
     book = _spreadsheet()
 
     def _get():
         try:
             return book.worksheet(title)
-        except Exception:
+        except WorksheetNotFound:
             return book.add_worksheet(title=title, rows=2000, cols=max(cols, 8))
 
     return _with_sheets_retry(_get)
@@ -159,15 +162,23 @@ def _write_df(title: str, df: pd.DataFrame) -> None:
     needed_rows = max(len(values) + 10, 100)
     needed_cols = max(len(header) + 2, 8)
 
-    def _put():
-        try:
-            ws.resize(rows=needed_rows, cols=needed_cols)
-        except Exception:
-            pass
-        ws.clear()
-        ws.update(range_name="A1", values=values, value_input_option="USER_ENTERED")
-
-    _with_sheets_retry(_put)
+    # Grow before writing, but never clear or shrink existing data first.
+    # A failed update leaves the previous values intact.
+    if needed_rows > ws.row_count or needed_cols > ws.col_count:
+        _with_sheets_retry(lambda: ws.resize(
+            rows=max(needed_rows, ws.row_count), cols=max(needed_cols, ws.col_count)
+        ))
+    _with_sheets_retry(lambda: ws.update(
+        range_name="A1", values=values, value_input_option="RAW"
+    ))
+    # Only remove stale trailing cells after the new values have been accepted.
+    if len(values) < ws.row_count:
+        _with_sheets_retry(lambda: ws.batch_clear([f"{len(values) + 1}:{ws.row_count}"]))
+    if len(header) < ws.col_count:
+        from gspread.utils import rowcol_to_a1
+        first = rowcol_to_a1(1, len(header) + 1)
+        last = rowcol_to_a1(len(values), ws.col_count)
+        _with_sheets_retry(lambda: ws.batch_clear([f"{first}:{last}"]))
 
 
 def load_trades() -> pd.DataFrame:

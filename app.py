@@ -529,7 +529,12 @@ def _build_volume_chart(df: pd.DataFrame, ym_start: str, ym_end: str, palette_ar
 def render_trade_browse() -> None:
     """로그인 없이 실거래 내역을 조회한다."""
     st.subheader("실거래가 조회")
-    trades_df = get_cached_trades()
+    refresh = st.button("최신 데이터 불러오기", key="browse_refresh")
+    try:
+        trades_df = get_cached_trades(force=refresh)
+    except Exception:
+        st.error("실거래 저장소를 읽지 못했습니다. 잠시 후 최신 데이터 불러오기를 눌러주세요.")
+        return
     if trades_df.empty:
         st.info("저장된 실거래가 없습니다. 실거래가 크롤링 탭에서 수집하면 여기에 표시됩니다.")
         return
@@ -586,6 +591,8 @@ def render_trade_browse() -> None:
             "단지": selected_apt,
         }
     query = st.session_state.get(SESSION_KEY_BROWSE_QUERY)
+    if query and query != {"구": selected_gu, "동": selected_dong, "단지": selected_apt}:
+        st.info("검색 조건이 변경되었습니다. 검색 버튼을 눌러 결과에 적용하세요.")
     if not query:
         st.info("구·동·단지를 선택한 뒤 검색을 누르세요.")
         return
@@ -600,8 +607,9 @@ def render_trade_browse() -> None:
         st.warning("계약일 정보가 없어 기간을 선택할 수 없습니다.")
         return
 
+    ym_options = pd.period_range(ym_options[0], ym_options[-1], freq="M").astype(str).tolist()
     default_end = ym_options[-1]
-    cut = (pd.Timestamp(default_end + "-01") - pd.DateOffset(years=10)).strftime("%Y-%m")
+    cut = (pd.Timestamp(default_end + "-01") - pd.DateOffset(months=119)).strftime("%Y-%m")
     default_start = next((x for x in ym_options if x >= cut), ym_options[0])
     query_key = f"{query.get('구')}_{query.get('동')}_{query.get('단지')}"
     if len(ym_options) == 1:
@@ -719,7 +727,11 @@ def render_trade_tracker(apartment_df: pd.DataFrame = None) -> None:
     else:
         st.warning("`.streamlit/secrets.toml`의 `PUBLIC_DATA_API_KEY`를 확인하세요.")
 
-    tracked = load_tracked_districts()
+    try:
+        tracked = load_tracked_districts()
+    except Exception:
+        st.error("추적 구를 불러오지 못했습니다. 저장소 연결을 확인해주세요.")
+        return
     st.markdown("#### 추적 구")
     if not tracked:
         st.info("아래에서 구를 추가한 뒤 수집을 실행하세요. 선택한 구의 거래가 전부 저장됩니다.")
@@ -1463,7 +1475,7 @@ def _get_data_password():
     except Exception:
         return ""
 
-required_password = _get_data_password() or "1234"
+required_password = _get_data_password()
 _col_pw, _col_btn = st.sidebar.columns([1, 1])
 with _col_pw:
     password_input = st.text_input("비밀번호 입력", type="password", key="data_password_input")

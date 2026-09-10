@@ -30,7 +30,6 @@ from config import (
 
 TRADE_API_URLS = [
     "https://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev",
-    "http://openapi.molit.go.kr/OpenAPI_ToolInstallPackage/service/rest/RTMSOBJSvc/getRTMSDataSvcAptTradeDev",
 ]
 
 ITEM_FIELDS = {
@@ -262,16 +261,10 @@ def load_trade_history(path: str = TRADE_HISTORY_CSV) -> pd.DataFrame:
     from sheets_store import is_sheets_configured, load_trades
 
     if is_sheets_configured():
-        try:
-            return load_trades()
-        except Exception:
-            return pd.DataFrame()
+        return load_trades()
     if not os.path.exists(path):
         return pd.DataFrame()
-    try:
-        return pd.read_csv(path, encoding="utf-8-sig")
-    except Exception:
-        return pd.DataFrame()
+    return pd.read_csv(path, encoding="utf-8-sig")
 
 
 def save_trade_history(df: pd.DataFrame, path: str = TRADE_HISTORY_CSV) -> None:
