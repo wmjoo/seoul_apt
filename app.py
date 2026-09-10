@@ -1113,10 +1113,10 @@ if selected_subway != "전체":
 # 결과 표시
 
 
-MAIN_TABS = ["📋 목록", "🗺️ 지도", "📈 통계", "🔎 실거래가 조회", "🔒 실거래가 크롤링"]
+MAIN_TABS = ["🔎 실거래가 조회", "🔒 실거래가 크롤링", "📋 목록", "🗺️ 지도", "📈 통계"]
 
 if len(filtered_df) > 0:
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(MAIN_TABS)
+    tab4, tab5, tab1, tab2, tab3 = st.tabs(MAIN_TABS)
 
     with tab1:
         render_list_metrics(filtered_df)
@@ -1463,7 +1463,7 @@ if len(filtered_df) > 0:
         render_tracker_tab(df)
 else:
     st.warning("조건에 맞는 아파트가 없습니다. 필터를 조정해주세요.")
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(MAIN_TABS)
+    tab4, tab5, tab1, tab2, tab3 = st.tabs(MAIN_TABS)
     with tab1:
         st.info("검색 결과가 없습니다. 필터를 조정해주세요.")
     with tab2:
