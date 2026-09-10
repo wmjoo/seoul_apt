@@ -15,10 +15,10 @@ class MarketTests(unittest.TestCase):
     def test_shading_clips_to_selected_months(self):
         fig = shade_downturns(go.Figure(), "2022-06", "2023-03")
         self.assertEqual(len(fig.layout.shapes), 2)
-        self.assertEqual(fig.layout.shapes[0].x0, "2022-06-01T00:00:00")
+        self.assertEqual(fig.layout.shapes[0].x0, "2022-07-01T00:00:00")
         self.assertEqual(fig.layout.shapes[1].x1, "2023-04-01T00:00:00")
         self.assertEqual(fig.layout.shapes[0].layer, "below")
-        self.assertEqual(len(shade_downturns(go.Figure(), "2024-01", "2026-09").layout.shapes), 0)
+        self.assertEqual(len(shade_downturns(go.Figure(), "2024-07", "2026-09").layout.shapes), 0)
 
     def test_counts_use_filtered_data_and_exclude_unclassified_years(self):
         df = pd.DataFrame({"계약일": ["2022-01-01", "2022-05-01", "2025-12-01", "2026-01-01"]})
@@ -33,8 +33,8 @@ class ComparisonTests(unittest.TestCase):
         result = phase_comparison(frame, "2023-07", "2024-12").set_index("시장 국면")
         self.assertEqual(result.loc["상승기", "비교 기간(개월)"], 12)
         self.assertEqual(result.loc["하락기", "비교 기간(개월)"], 6)
-        self.assertEqual(result.loc["상승기", "연평균 거래 건수(연환산)"], 1)
-        self.assertEqual(result.loc["하락기", "연평균 거래 건수(연환산)"], 4)
+        self.assertEqual(result.loc["상승기", "연평균 거래 건수(연환산)"], 2)
+        self.assertEqual(result.loc["하락기", "연평균 거래 건수(연환산)"], 2)
 
     def test_absent_phase_has_no_average(self):
         from market_cycles import phase_comparison
@@ -42,3 +42,19 @@ class ComparisonTests(unittest.TestCase):
         result = phase_comparison(frame, "2025-01", "2026-12").set_index("시장 국면")
         self.assertEqual(result.loc["상승기", "비교 기간(개월)"], 12)
         self.assertTrue(pd.isna(result.loc["하락기", "연평균 거래 건수(연환산)"]))
+
+
+class MonthlyIndexTests(unittest.TestCase):
+    def test_half_years_can_have_opposite_directions(self):
+        from market_cycles import half_phase
+        self.assertEqual(half_phase("2022-06-30"), "상승기")
+        self.assertEqual(half_phase("2022-07-01"), "하락기")
+        self.assertEqual(half_phase("2023-07-01"), "상승기")
+        self.assertEqual(half_phase("2024-01-01"), "하락기")
+        self.assertEqual(half_phase("2026-01-01"), "미분류")
+
+    def test_source_months_complete(self):
+        from market_cycles import _INDEX
+        expected = pd.period_range("2005-12", "2025-12", freq="M").astype(str)
+        self.assertEqual(set(_INDEX), set(expected))
+        self.assertTrue(all(value > 0 for value in _INDEX.values()))

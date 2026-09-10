@@ -1,4 +1,5 @@
-from market_cycles import DOWN_YEARS, market_phase, shade_downturns, annual_activity, phase_comparison, HISTORY_SOURCE, RECENT_SOURCE
+from trade_compare import render_trade_compare
+from market_cycles import DOWN_YEARS, half_phase, market_phase, shade_downturns, annual_activity, phase_comparison, HISTORY_SOURCE
 from trade_metadata import complex_metadata
 """
 서울 아파트 검색 앱 (Streamlit)
@@ -347,6 +348,9 @@ def _build_trade_chart(df: pd.DataFrame, title: str, ym_start: str = None, ym_en
     fig = go.Figure()
     if chart_df.empty:
         fig.update_layout(title=title, height=300, paper_bgcolor="white", plot_bgcolor="white")
+        if ym_start and ym_end:
+            fig.update_xaxes(**_xaxis_period(ym_start, ym_end))
+            return shade_downturns(fig, ym_start, ym_end)
         return fig
 
     price_eok = chart_df["거래금액_만원"].astype(float) / 10000.0
@@ -400,7 +404,7 @@ def _build_trade_chart(df: pd.DataFrame, title: str, ym_start: str = None, ym_en
             x=dates,
             y=price_eok,
             mode="markers",
-            marker=dict(color="#e53935", size=9, opacity=0.88, line=dict(width=0.6, color="white")),
+            marker=dict(color="#e53935", size=7, opacity=0.60, line=dict(width=0.6, color="white")),
             name="실거래가",
             text=hover,
             hovertemplate="%{text}<extra></extra>",
@@ -428,7 +432,8 @@ def _build_trade_chart(df: pd.DataFrame, title: str, ym_start: str = None, ym_en
             zeroline=False,
         ),
     )
-    return fig
+    return shade_downturns(fig, ym_start or dates.min().strftime("%Y-%m"),
+                           ym_end or dates.max().strftime("%Y-%m"))
 
 
 _VOLUME_PALETTE = [
@@ -533,11 +538,11 @@ def render_trade_browse(apartment_df=None) -> None:
     if not is_tracker_logged_in():
         render_tracker_login_panel("실거래가 조회", "browse")
         return
-    if st.button("로그아웃", key="browse_logout"):
+    _, refresh_col, logout_col = st.columns([7, 2, 1])
+    refresh = refresh_col.button("최신 데이터 불러오기", key="browse_refresh", use_container_width=True)
+    if logout_col.button("로그아웃", key="browse_logout", use_container_width=True):
         logout_tracker()
         st.rerun()
-    st.subheader("실거래가 조회")
-    refresh = st.button("최신 데이터 불러오기", key="browse_refresh")
     try:
         trades_df = get_cached_trades(force=refresh)
     except Exception:
@@ -681,7 +686,7 @@ def render_trade_browse(apartment_df=None) -> None:
             )
         st.markdown('<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px">'
                     + "".join(badges) + '</div>', unsafe_allow_html=True)
-        down_count = int(view_df["계약일"].dt.year.isin(DOWN_YEARS).sum())
+        down_count = int(view_df["계약일"].map(half_phase).eq("하락기").sum())
         st.caption(f"현재 조건에서 하락기 거래 {down_count:,}건")
         st.dataframe(annual_activity(view_df, ym_start, ym_end), hide_index=True, width="stretch")
         st.markdown("**상승기·하락기 연평균 거래 건수 비교**")
@@ -690,8 +695,8 @@ def render_trade_browse(apartment_df=None) -> None:
                    "거래가 없는 달도 포함하고, 비교 기간이 없는 국면은 평균을 표시하지 않습니다. "
                    "2026년 이후는 미분류로 비교에서 제외합니다. "
                    "기간·면적·층 필터와 저장된 데이터 기준이며 미수집 기간의 0건은 실제 무거래를 뜻하지 않습니다.")
-        st.caption("현재 시장 분류는 연간 기준입니다. 반기 말 지수 검증 전까지 상·하반기로 추정하지 않습니다.")
-        st.markdown(f"[2006–2024 지수 자료]({HISTORY_SOURCE}) · [2025 연간 동향]({RECENT_SOURCE})")
+        st.caption("회색 배경·하락기 건수·연평균 비교는 반기 기준입니다. 6월/12월 지수를 직전 반기 말과 비교합니다. 연간 표시는 12월 전년 대비입니다.")
+        st.markdown(f"[한국은행 ECOS · KB 서울 아파트 월별 매매가격지수]({HISTORY_SOURCE}) · 2006–2025 공통 적용")
 
     if query.get("단지") in (None, "전체"):
         st.caption("단지를 선택해 검색하면 시세 점·추세 차트가 표시됩니다.")
@@ -701,7 +706,7 @@ def render_trade_browse(apartment_df=None) -> None:
             use_container_width=True,
             config={"scrollZoom": True, "displaylogo": False},
         )
-    st.caption("추세선: 이동 중앙값 · 선 주변 음영: 이동 20~80% 분위 구간")
+    st.caption("추세선: 이동 중앙값 · 파란 음영: 이동 20~80% 분위 구간 · 회색 배경: 서울 시장 반기 하락기")
     if selected_area == "전체":
         st.caption("전용면적 전체 선택 시 서로 다른 면적의 거래가격이 함께 표시됩니다.")
     st.plotly_chart(
@@ -1137,10 +1142,10 @@ if selected_subway != "전체":
 # 결과 표시
 
 
-MAIN_TABS = ["🔎 실거래가 조회", "🔒 실거래가 크롤링", "📋 목록", "🗺️ 지도", "📈 통계"]
+MAIN_TABS = ["🔎 실거래가 조회", "⚖️ 단지 비교", "🔒 실거래가 크롤링", "📋 목록", "🗺️ 지도", "📈 통계"]
 
 if len(filtered_df) > 0:
-    tab4, tab5, tab1, tab2, tab3 = st.tabs(MAIN_TABS)
+    tab4, tab6, tab5, tab1, tab2, tab3 = st.tabs(MAIN_TABS)
 
     with tab1:
         render_list_metrics(filtered_df)
@@ -1483,11 +1488,13 @@ if len(filtered_df) > 0:
 
     with tab4:
         render_trade_browse(df)
+    with tab6:
+        render_trade_compare(get_cached_trades, _prepare_browse_trades, _build_trade_chart, _build_volume_chart)
     with tab5:
         render_tracker_tab(df)
 else:
     st.warning("조건에 맞는 아파트가 없습니다. 필터를 조정해주세요.")
-    tab4, tab5, tab1, tab2, tab3 = st.tabs(MAIN_TABS)
+    tab4, tab6, tab5, tab1, tab2, tab3 = st.tabs(MAIN_TABS)
     with tab1:
         st.info("검색 결과가 없습니다. 필터를 조정해주세요.")
     with tab2:
@@ -1496,6 +1503,8 @@ else:
         st.info("검색 결과가 없습니다. 필터를 조정해주세요.")
     with tab4:
         render_trade_browse(df)
+    with tab6:
+        render_trade_compare(get_cached_trades, _prepare_browse_trades, _build_trade_chart, _build_volume_chart)
     with tab5:
         render_tracker_tab(df)
 
