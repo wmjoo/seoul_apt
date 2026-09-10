@@ -53,11 +53,20 @@ SEOUL_DATA_API_KEY=your_seoul_api_key
 
 #### Streamlit Secrets 설정 (선택사항)
 
-`.streamlit/secrets.toml` 파일을 생성하고 데이터 생성 비밀번호를 설정하세요:
+`.streamlit/secrets.toml` 파일을 생성하세요. 예시는 저장소의 `secrets.toml.example`을 참고하면 됩니다.
 
 ```toml
+[secrets]
 data_password = "your_password_here"
+
+[tracker_users]
+family1 = "password1"
+family2 = "password2"
 ```
+
+- `data_password`: 사이드바「새 데이터 생성」버튼용
+- `[tracker_users]`: 실거래 트래커 탭 로그인 계정 (아이디 = 비밀번호). 가족/지인 몇 명만 추가하면 됩니다.
+- 실거래 이력 파일 `apt_trades.csv`는 로그인한 세션에서만 읽습니다. Git에 올리지 마세요.
 
 ### 2. 데이터 생성
 
@@ -101,6 +110,8 @@ streamlit run app.py
 - **지하철역 거리**: 지하철역과의 거리 범위 설정
 - **가장 가까운 지하철역**: 특정 지하철역 선택
 
+**실거래가 조회** 탭은 로그인 없이 시트에 저장된 실거래를 봅니다. **실거래가 크롤링** 탭은 `[tracker_users]` 계정으로 로그인한 뒤에만 수집할 수 있습니다.
+
 ### 4. 결과 확인
 
 - **목록 탭**: 필터링된 아파트 목록을 테이블로 확인
@@ -112,11 +123,13 @@ streamlit run app.py
 ```
 seoul_apt/
 ├── app.py                 # Streamlit 메인 앱
+├── auth.py                # 실거래 트래커 로그인 (secrets + session_state)
 ├── crawler.py             # 데이터 크롤링 모듈
 ├── utils.py               # 유틸리티 함수들
 ├── config.py              # 설정 파일
 ├── subway_stations.py     # 지하철역 좌표 데이터
 ├── requirements.txt       # 필요한 패키지 목록
+├── secrets.toml.example   # Secrets 설정 예시
 ├── README.md              # 이 파일
 └── seoul_apartments.csv   # 크롤링된 데이터 (생성됨)
 ```

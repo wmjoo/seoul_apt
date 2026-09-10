@@ -21,12 +21,33 @@
 ```toml
 [secrets]
 data_password = "6398"
+PUBLIC_DATA_API_KEY = "your_api_key_here"
+SEOUL_DATA_API_KEY = "your_seoul_api_key_here"
 
-# API 키는 환경변수로 설정하는 것을 권장합니다
-# 또는 아래와 같이 secrets에 추가할 수 있습니다
-# PUBLIC_DATA_API_KEY = "your_api_key_here"
-# SEOUL_DATA_API_KEY = "your_seoul_api_key_here"
+[secrets.tracker_users]
+family1 = "password1"
+family2 = "password2"
+
+[sheets]
+spreadsheet_id = "구글시트_ID"
+
+[gcp_service_account]
+type = "service_account"
+project_id = "프로젝트ID"
+private_key_id = "키ID"
+private_key = """-----BEGIN PRIVATE KEY-----
+...
+-----END PRIVATE KEY-----
+"""
+client_email = "서비스계정@프로젝트.iam.gserviceaccount.com"
+client_id = "클라이언트ID"
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+universe_domain = "googleapis.com"
 ```
+
+`private_key`는 Cloud에서 줄바꿈이 깨지기 쉽습니다. 위처럼 삼중 따옴표 PEM을 그대로 넣거나, `\n`이 들어간 한 줄 키를 쓰세요. `[gcp_service_account]`와 `sheets.spreadsheet_id`가 없으면 실거래 조회/수집은 비어 있거나 로컬 CSV로만 동작합니다.
 
 **또는 환경변수로 설정:**
 - Streamlit Cloud의 "Settings" > "Environment variables"에서:
@@ -41,8 +62,8 @@ data_password = "6398"
 ## 주의사항
 
 1. **데이터 파일**: 
-   - CSV 파일은 Git에 커밋되지 않으므로, Streamlit Cloud에서는 데이터가 없을 수 있습니다
-   - "새 데이터 생성" 기능을 사용하여 API로 데이터를 수집할 수 있습니다
+   - 아파트 목록(`seoul_apartments_metadata.csv`)은 Git에 있어 목록/지도/통계는 바로 보입니다
+   - 실거래 이력은 Google 시트 Secrets가 있어야 Cloud에서 조회됩니다
 
 2. **API 키**:
    - API 키는 반드시 Secrets 또는 환경변수로 설정해야 합니다

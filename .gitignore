@@ -18,6 +18,11 @@ ENV/
 # *.xls
 !requirements.txt
 
+# 실거래 이력 (로그인 사용자 전용, 저장소에 올리지 않음)
+apt_trades.csv
+tracked_districts.csv
+tracked_complexes.csv
+
 # IDE
 .vscode/
 .idea/

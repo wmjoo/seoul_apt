@@ -9,6 +9,10 @@ Streamlit Cloud의 Secrets는 **TOML 형식**을 사용합니다. 아래 형식�
 data_password = "6398"
 PUBLIC_DATA_API_KEY = "실제_API_키_값"
 SEOUL_DATA_API_KEY = "실제_API_키_값"
+
+[secrets.tracker_users]
+family1 = "비밀번호1"
+family2 = "비밀번호2"
 ```
 
 **주의사항:**
@@ -16,7 +20,8 @@ SEOUL_DATA_API_KEY = "실제_API_키_값"
 - `[secrets]` 섹션 헤더가 필요합니다
 - 따옴표로 감싸야 합니다
 - `~~~` 같은 마스킹 문자는 제거하고 실제 키 값만 입력하세요
-- 모든 값은 `[secrets]` 섹션 안에 있어야 합니다
+- API 키와 데이터 생성 비밀번호는 `[secrets]` 섹션 안에 있어야 합니다
+- 실거래 트래커 계정은 `[secrets.tracker_users]` (Cloud) 또는 `[tracker_users]` (로컬)에 둡니다
 
 ## 현재 코드 동작 방식
 
@@ -37,6 +42,10 @@ Streamlit Cloud의 **Secrets**에 다음을 입력:
 data_password = "6398"
 PUBLIC_DATA_API_KEY = "실제_API_키_값_여기"
 SEOUL_DATA_API_KEY = "실제_API_키_값_여기"
+
+[secrets.tracker_users]
+family1 = "비밀번호1"
+family2 = "비밀번호2"
 ```
 
 **중요:**
@@ -44,6 +53,8 @@ SEOUL_DATA_API_KEY = "실제_API_키_값_여기"
 - 모든 값은 따옴표로 감싸기
 - 주석(`#`) 사용 불가
 - 실제 키 값만 입력 (마스킹 문자 제거)
+
+실거래 이력은 비공개 Google 스프레드시트에 저장합니다. `[gcp_service_account]`와 `[sheets] spreadsheet_id`를 Secrets에 넣고, 시트는 본인 계정과 서비스 계정에만 공유하세요. Git에 키/시트를 올리지 마세요.
 
 ## 잘못된 형식 (사용하지 마세요)
 
@@ -68,5 +79,9 @@ PUBLIC_DATA_API_KEY = "키값"
 data_password = "6398"
 PUBLIC_DATA_API_KEY = "실제_키_값"
 SEOUL_DATA_API_KEY = "실제_키_값"
+
+[secrets.tracker_users]
+family1 = "비밀번호1"
+family2 = "비밀번호2"
 ```
 

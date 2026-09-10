@@ -10,11 +10,32 @@ import streamlit as st
 import folium
 from streamlit_folium import st_folium
 
+from auth import (
+    get_tracker_user,
+    is_tracker_logged_in,
+    logout_tracker,
+    render_tracker_login_panel,
+)
 from crawler import SeoulApartmentCrawler
+from config import SEOUL_DISTRICTS
+from molit_trades import (
+    collect_trades,
+    current_ym,
+    has_molit_api_key,
+    load_trade_history,
+    load_tracked_districts,
+    months_back,
+    save_tracked_districts,
+    ym_to_date_span,
+)
+from sheets_store import is_sheets_configured, spreadsheet_url
 from utils import extract_dong
 
 # 새로 수집한 데이터를 세션에 넣어두는 키 (Cloud에서 파일 저장이 안 돼도 새로고침 반영)
 SESSION_KEY_APARTMENT_DATA = "apartment_data"
+SESSION_KEY_COLLECT_BANNER = "tracker_collect_banner"
+SESSION_KEY_TRADES_CACHE = "cached_trades_df"
+SESSION_KEY_BROWSE_QUERY = "browse_trade_query"
 # 메인 아파트(실거래가) 단지명 유사도 매칭 임계값 (0~1). 0.75로 완화해 매칭률 상승
 MAIN_APT_SIMILARITY_THRESHOLD = 0.75
 
@@ -129,6 +150,560 @@ def preprocess_apartment_df(df: pd.DataFrame) -> pd.DataFrame:
     if "동" in df.columns:
         df["동"] = df["동"].replace("답십리1동", "답십리동")
     return df
+
+
+def get_cached_trades(force: bool = False) -> pd.DataFrame:
+    """실거래 이력을 세션에 캐시한다. (탭이 매 실행마다 그려져도 시트를 반복 조회하지 않음)"""
+    if force or SESSION_KEY_TRADES_CACHE not in st.session_state:
+        st.session_state[SESSION_KEY_TRADES_CACHE] = load_trade_history()
+    cached = st.session_state[SESSION_KEY_TRADES_CACHE]
+    if cached is None:
+        return pd.DataFrame()
+    return cached
+
+
+def render_list_metrics(filtered_df: pd.DataFrame) -> None:
+    """목록 탭 전용 평균 지표."""
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        year_data = filtered_df["건축연도"].dropna()
+        if len(year_data) > 0:
+            st.metric("평균 건축연도", f"{int(year_data.mean())}년")
+        else:
+            st.metric("평균 건축연도", "N/A")
+    with col2:
+        household_data = filtered_df["세대수"].dropna()
+        if len(household_data) > 0:
+            st.metric("평균 세대수", f"{int(household_data.mean())}세대")
+        else:
+            st.metric("평균 세대수", "N/A")
+    with col3:
+        if "세대당평균평형" in filtered_df.columns:
+            avg_pyeong_data = filtered_df["세대당평균평형"].dropna()
+            if len(avg_pyeong_data) > 0:
+                st.metric("평균 평형 (세대당)", f"{avg_pyeong_data.mean():.1f}평")
+            elif "평형" in filtered_df.columns:
+                pyeong_data = filtered_df["평형"].dropna()
+                st.metric(
+                    "평균 평형",
+                    f"{pyeong_data.mean():.1f}평" if len(pyeong_data) > 0 else "N/A",
+                )
+            else:
+                st.metric("평균 평형", "N/A")
+        elif "평형" in filtered_df.columns:
+            pyeong_data = filtered_df["평형"].dropna()
+            st.metric(
+                "평균 평형",
+                f"{pyeong_data.mean():.1f}평" if len(pyeong_data) > 0 else "N/A",
+            )
+        else:
+            st.metric("평균 평형", "N/A")
+    with col4:
+        if "주차대수" in filtered_df.columns:
+            parking_data = filtered_df["주차대수"].dropna()
+            parking_data = parking_data[parking_data >= 0]
+            if len(parking_data) > 0:
+                st.metric("평균 주차대수", f"{int(parking_data.mean())}대")
+            else:
+                st.metric("평균 주차대수", "N/A")
+        else:
+            st.metric("평균 주차대수", "N/A")
+    with col5:
+        if "세대당주차면수" in filtered_df.columns:
+            parking_per_hh_data = filtered_df["세대당주차면수"].dropna()
+            if len(parking_per_hh_data) > 0:
+                st.metric("평균 세대당 주차면수", f"{parking_per_hh_data.mean():.2f}면")
+            else:
+                st.metric("평균 세대당 주차면수", "N/A")
+        else:
+            distance_data = filtered_df["지하철역거리_km"].dropna()
+            if len(distance_data) > 0:
+                st.metric("평균 지하철 거리", f"{distance_data.mean():.2f}km")
+            else:
+                st.metric("평균 지하철 거리", "N/A")
+
+
+def _unique_labels(series: pd.Series) -> list:
+    return sorted({str(x).strip() for x in series.dropna() if str(x).strip()})
+
+
+def _dong_col(df: pd.DataFrame) -> str:
+    if "법정동" in df.columns:
+        return "법정동"
+    if "동" in df.columns:
+        return "동"
+    return ""
+
+
+def _apt_col(df: pd.DataFrame) -> str:
+    if "아파트명" in df.columns:
+        return "아파트명"
+    if "아파트" in df.columns:
+        return "아파트"
+    return ""
+
+
+def _format_manwon(value) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    try:
+        manwon = int(round(float(value)))
+    except (TypeError, ValueError):
+        return ""
+    eok, rest = divmod(manwon, 10000)
+    if eok and rest:
+        return f"{eok}억 {rest:,}"
+    if eok:
+        return f"{eok}억"
+    return f"{rest:,}만원"
+
+
+def _prepare_browse_trades(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "계약일" in out.columns:
+        out["계약일"] = pd.to_datetime(out["계약일"], errors="coerce")
+    else:
+        out["계약일"] = pd.NaT
+    if out["계약일"].isna().any() and all(c in out.columns for c in ("년", "월", "일")):
+        y = pd.to_numeric(out["년"], errors="coerce")
+        m = pd.to_numeric(out["월"], errors="coerce")
+        d = pd.to_numeric(out["일"], errors="coerce")
+        parsed = pd.to_datetime({"year": y, "month": m, "day": d}, errors="coerce")
+        out["계약일"] = out["계약일"].fillna(parsed)
+    out["전용면적_num"] = (
+        pd.to_numeric(out["전용면적"], errors="coerce").round(2)
+        if "전용면적" in out.columns
+        else pd.Series(pd.NA, index=out.index)
+    )
+    out["층_num"] = (
+        pd.to_numeric(out["층"], errors="coerce") if "층" in out.columns else pd.Series(pd.NA, index=out.index)
+    )
+    if "거래금액_만원" in out.columns:
+        out["거래금액_만원"] = pd.to_numeric(out["거래금액_만원"], errors="coerce")
+    elif "거래금액" in out.columns:
+        out["거래금액_만원"] = out["거래금액"].map(
+            lambda x: int(re.sub(r"[^\d]", "", str(x))) if pd.notna(x) and re.sub(r"[^\d]", "", str(x)) else None
+        )
+    else:
+        out["거래금액_만원"] = pd.NA
+    out["계약년월"] = out["계약일"].dt.strftime("%Y-%m")
+    out.loc[out["계약일"].isna(), "계약년월"] = ""
+    if "해제여부" in out.columns:
+        cancelled = out["해제여부"].astype(str).str.contains("해제", na=False)
+        out = out.loc[~cancelled].copy()
+    return out
+
+
+def _apply_browse_query(df: pd.DataFrame, query: dict) -> pd.DataFrame:
+    dong_col = _dong_col(df)
+    apt_col = _apt_col(df)
+    filtered = df
+    gu = query.get("구") or "전체"
+    dong = query.get("동") or "전체"
+    apt = query.get("단지") or "전체"
+    if gu != "전체" and "구" in filtered.columns:
+        filtered = filtered[filtered["구"].astype(str).str.strip() == gu]
+    if dong != "전체" and dong_col:
+        filtered = filtered[filtered[dong_col].astype(str).str.strip() == dong]
+    if apt != "전체" and apt_col:
+        filtered = filtered[filtered[apt_col].astype(str).str.strip() == apt]
+    return filtered
+
+
+def _build_trade_chart(df: pd.DataFrame, title: str):
+    import plotly.graph_objects as go
+
+    chart_df = df.dropna(subset=["계약일", "거래금액_만원"]).sort_values("계약일")
+    fig = go.Figure()
+    if chart_df.empty:
+        fig.update_layout(title=title, height=420, paper_bgcolor="white", plot_bgcolor="white")
+        return fig
+
+    price_eok = chart_df["거래금액_만원"].astype(float) / 10000.0
+    dates = chart_df["계약일"]
+    hover = [
+        f"{d.strftime('%Y-%m-%d')}<br>{_format_manwon(p)} / {int(f)}층 / {a:.2f}㎡"
+        if pd.notna(f) and pd.notna(a)
+        else f"{d.strftime('%Y-%m-%d')}<br>{_format_manwon(p)}"
+        for d, p, f, a in zip(dates, chart_df["거래금액_만원"], chart_df["층_num"], chart_df["전용면적_num"])
+    ]
+
+    if len(chart_df) >= 4:
+        window = max(5, min(15, len(chart_df) // 6))
+        mid = price_eok.rolling(window, center=True, min_periods=1).median()
+        hi = price_eok.rolling(window, center=True, min_periods=1).quantile(0.8)
+        lo = price_eok.rolling(window, center=True, min_periods=1).quantile(0.2)
+        fig.add_trace(
+            go.Scatter(
+                x=dates,
+                y=hi,
+                mode="lines",
+                line=dict(width=0),
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=dates,
+                y=lo,
+                mode="lines",
+                line=dict(width=0, color="#90caf9"),
+                fill="tonexty",
+                fillcolor="rgba(33, 150, 243, 0.16)",
+                hoverinfo="skip",
+                name="추세 구간",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=dates,
+                y=mid,
+                mode="lines",
+                line=dict(color="#1976d2", width=2.4, dash="solid"),
+                name="추세",
+            )
+        )
+
+    fig.add_trace(
+        go.Scatter(
+            x=dates,
+            y=price_eok,
+            mode="markers",
+            marker=dict(color="#e53935", size=9, opacity=0.88, line=dict(width=0.6, color="white")),
+            name="실거래가",
+            text=hover,
+            hovertemplate="%{text}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=16)),
+        height=460,
+        margin=dict(l=48, r=16, t=56, b=40),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        hovermode="closest",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, bgcolor="rgba(0,0,0,0)"),
+        xaxis=dict(showgrid=True, gridcolor="#f0f0f0", zeroline=False),
+        yaxis=dict(
+            title="",
+            ticksuffix="억",
+            showgrid=True,
+            gridcolor="#eeeeee",
+            zeroline=False,
+        ),
+    )
+    return fig
+
+
+def render_trade_browse() -> None:
+    """로그인 없이 실거래 내역을 조회한다."""
+    st.subheader("실거래가 조회")
+    trades_df = get_cached_trades()
+    if trades_df.empty:
+        st.info("저장된 실거래가 없습니다. 실거래가 크롤링 탭에서 수집하면 여기에 표시됩니다.")
+        return
+
+    trades_df = _prepare_browse_trades(trades_df)
+    dong_col = _dong_col(trades_df)
+    apt_col = _apt_col(trades_df)
+    gu_values = _unique_labels(trades_df["구"]) if "구" in trades_df.columns else []
+    gu_options = ["전체"] + gu_values
+    default_gu = "동대문구" if "동대문구" in gu_values else (gu_values[0] if gu_values else "전체")
+
+    gcol, dcol, acol, bcol = st.columns([2.3, 2.3, 3.1, 0.9])
+    with gcol:
+        selected_gu = st.selectbox(
+            "구",
+            gu_options,
+            index=gu_options.index(default_gu) if default_gu in gu_options else 0,
+            key="browse_gu_filter",
+        )
+    gu_df = trades_df if selected_gu == "전체" or "구" not in trades_df.columns else trades_df[
+        trades_df["구"].astype(str).str.strip() == selected_gu
+    ]
+    dong_options = ["전체"]
+    if dong_col:
+        dong_options += _unique_labels(gu_df[dong_col])
+    with dcol:
+        selected_dong = st.selectbox(
+            "동",
+            dong_options,
+            index=0,
+            key=f"browse_dong_filter_{selected_gu}",
+        )
+    dong_df = gu_df if selected_dong == "전체" or not dong_col else gu_df[
+        gu_df[dong_col].astype(str).str.strip() == selected_dong
+    ]
+    apt_options = ["전체"]
+    if apt_col:
+        apt_options += _unique_labels(dong_df[apt_col])
+    with acol:
+        selected_apt = st.selectbox(
+            "단지명",
+            apt_options,
+            index=0,
+            key=f"browse_apt_filter_{selected_gu}_{selected_dong}",
+        )
+    with bcol:
+        st.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
+        searched = st.button("검색", width="stretch", key="browse_search_btn")
+
+    if searched:
+        st.session_state[SESSION_KEY_BROWSE_QUERY] = {
+            "구": selected_gu,
+            "동": selected_dong,
+            "단지": selected_apt,
+        }
+    query = st.session_state.get(SESSION_KEY_BROWSE_QUERY)
+    if not query:
+        st.info("구·동·단지를 선택한 뒤 검색을 누르세요.")
+        return
+
+    result_df = _apply_browse_query(trades_df, query)
+    if result_df.empty:
+        st.warning("조건에 맞는 실거래가 없습니다.")
+        return
+
+    ym_options = sorted(x for x in result_df["계약년월"].dropna().unique() if x)
+    if not ym_options:
+        st.warning("계약일 정보가 없어 기간을 선택할 수 없습니다.")
+        return
+
+    default_end = ym_options[-1]
+    cut = (pd.Timestamp(default_end + "-01") - pd.DateOffset(years=5)).strftime("%Y-%m")
+    default_start = next((x for x in ym_options if x >= cut), ym_options[0])
+    query_key = f"{query.get('구')}_{query.get('동')}_{query.get('단지')}"
+    if len(ym_options) == 1:
+        ym_start = ym_end = ym_options[0]
+        st.caption(f"기간 {ym_start}")
+    else:
+        ym_start, ym_end = st.select_slider(
+            "기간",
+            options=ym_options,
+            value=(default_start, default_end),
+            key=f"browse_ym_range_{query_key}",
+        )
+
+    period_df = result_df[(result_df["계약년월"] >= ym_start) & (result_df["계약년월"] <= ym_end)]
+    areas = sorted({float(a) for a in result_df["전용면적_num"].dropna().unique()})
+    area_labels = ["전체"] + [f"{a:.2f}㎡" for a in areas]
+    area_default = "전체"
+    if areas:
+        mode_area = result_df["전용면적_num"].mode()
+        if len(mode_area) > 0:
+            area_default = f"{float(mode_area.iloc[0]):.2f}㎡"
+    fcol, ccol = st.columns([2, 3])
+    with fcol:
+        selected_area = st.selectbox(
+            "전용면적",
+            area_labels,
+            index=area_labels.index(area_default) if area_default in area_labels else 0,
+            key=f"browse_area_{query_key}",
+        )
+    with ccol:
+        st.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
+        exclude_first = st.checkbox("1층 제외", value=False, key=f"browse_exclude_1f_{query_key}")
+
+    view_df = period_df
+    if selected_area != "전체":
+        area_num = float(selected_area.replace("㎡", ""))
+        view_df = view_df[view_df["전용면적_num"] == area_num]
+    if exclude_first:
+        view_df = view_df[view_df["층_num"].fillna(-999) != 1]
+
+    apt_title = query.get("단지") if query.get("단지") not in (None, "전체") else "선택한 조건"
+    st.caption(f"{query.get('구')} {query.get('동')} {query.get('단지')} · {len(view_df):,}건")
+    if view_df.empty:
+        st.info("필터에 맞는 실거래가 없습니다. 기간이나 전용면적을 바꿔보세요.")
+        return
+
+    if query.get("단지") in (None, "전체"):
+        st.caption("단지를 선택해 검색하면 시세 점·추세 차트가 표시됩니다.")
+    else:
+        st.plotly_chart(
+            _build_trade_chart(view_df, f"{apt_title} 매매 실거래가"),
+            use_container_width=True,
+            config={"scrollZoom": True, "displaylogo": False},
+        )
+
+    show_cols = [
+        c
+        for c in ["계약일", "구", "법정동", "아파트명", "전용면적", "평", "층", "거래금액_만원", "거래유형"]
+        if c in view_df.columns
+    ]
+    table_df = view_df.sort_values("계약일", ascending=False)[show_cols].copy()
+    if "계약일" in table_df.columns:
+        table_df["계약일"] = pd.to_datetime(table_df["계약일"]).dt.strftime("%Y-%m-%d")
+    if "거래금액_만원" in table_df.columns:
+        table_df["거래금액"] = table_df["거래금액_만원"].map(_format_manwon)
+        table_df = table_df.drop(columns=["거래금액_만원"])
+    st.dataframe(table_df, width="stretch", hide_index=True, height=420)
+    st.download_button(
+        label="📥 실거래 내역 CSV 다운로드",
+        data=table_df.to_csv(index=False, encoding="utf-8-sig"),
+        file_name="apt_trades_filtered.csv",
+        mime="text/csv",
+        key="browse_trades_download",
+    )
+
+
+def render_tracker_tab(apartment_df: pd.DataFrame = None) -> None:
+    """실거래가 크롤링 탭: 비로그인은 로그인 폼, 로그인은 수집 화면."""
+    if not is_tracker_logged_in():
+        render_tracker_login_panel()
+        return
+
+    top, logout_col = st.columns([4, 1])
+    with top:
+        st.caption(f"{get_tracker_user()} 님으로 로그인됨")
+    with logout_col:
+        if st.button("로그아웃", width="stretch", key="tracker_logout"):
+            logout_tracker()
+            st.rerun()
+    render_trade_tracker(apartment_df)
+
+
+def render_trade_tracker(apartment_df: pd.DataFrame = None) -> None:
+    """로그인 사용자 전용 실거래 수집."""
+    st.subheader("실거래가 크롤링")
+    if is_sheets_configured():
+        st.caption("선택한 구의 매매 실거래는 비공개 Google 시트의 `trades` 탭에 저장됩니다.")
+        sheet_url = spreadsheet_url()
+        if sheet_url:
+            st.link_button("Google 시트 열기", sheet_url)
+    else:
+        st.warning(
+            "Google 시트가 아직 연결되지 않았습니다. "
+            "`secrets.toml`에 `[gcp_service_account]`와 `sheets.spreadsheet_id`를 넣으면 "
+            "비공개 시트로 저장됩니다. 지금은 로컬 CSV로 동작합니다."
+        )
+
+    if has_molit_api_key():
+        st.caption("국토부 API 키가 연결되어 있습니다.")
+    else:
+        st.warning("`.streamlit/secrets.toml`의 `PUBLIC_DATA_API_KEY`를 확인하세요.")
+
+    tracked = load_tracked_districts()
+    st.markdown("#### 추적 구")
+    if not tracked:
+        st.info("아래에서 구를 추가한 뒤 수집을 실행하세요. 선택한 구의 거래가 전부 저장됩니다.")
+    else:
+        remaining = st.multiselect(
+            "추적 구",
+            options=tracked,
+            default=tracked,
+            key="tracker_district_chips_" + "_".join(tracked),
+            label_visibility="collapsed",
+            placeholder="추적 중인 구가 없습니다.",
+        )
+        if list(remaining) != list(tracked):
+            save_tracked_districts([g for g in tracked if g in remaining])
+            st.rerun()
+
+    addable = [g for g in SEOUL_DISTRICTS if g not in tracked]
+    add_col, add_btn = st.columns([3, 1])
+    with add_col:
+        add_gu = st.selectbox("구 추가", addable, key="tracker_add_gu") if addable else None
+    with add_btn:
+        st.write("")
+        if st.button("추가", width="stretch", disabled=not add_gu, key="tracker_add_btn") and add_gu:
+            save_tracked_districts(tracked + [add_gu])
+            st.rerun()
+
+    st.markdown("#### 수집")
+    can_collect = has_molit_api_key() and bool(tracked)
+
+    def _run_collect(start_ym: str, skip_complete_months: bool) -> None:
+        bar = st.progress(0, text="수집 시작")
+        last_toast_year = None
+
+        def on_progress(done, total, msg):
+            nonlocal last_toast_year
+            frac = (done / total) if total else 0.0
+            bar.progress(min(1.0, frac), text=f"{msg} ({done}/{total})")
+            year = None
+            parts = msg.split()
+            if len(parts) >= 2 and "." in parts[1]:
+                year = parts[1].split(".")[0]
+            should_toast = done == 0 or done == total or (year and year != last_toast_year)
+            if should_toast:
+                st.toast(f"{msg} ({done}/{total})")
+                last_toast_year = year
+
+        existing = get_cached_trades()
+        before = 0 if existing.empty else len(existing)
+        end_ym = current_ym()
+        merged = collect_trades(
+            tracked,
+            start_ym=start_ym,
+            end_ym=end_ym,
+            on_progress=on_progress,
+            skip_complete_months=skip_complete_months,
+        )
+        added = max(0, len(merged) - before)
+        start_d, end_d = ym_to_date_span(start_ym, end_ym)
+        st.session_state[SESSION_KEY_TRADES_CACHE] = merged
+        st.session_state[SESSION_KEY_COLLECT_BANNER] = {
+            "start": start_d,
+            "end": end_d,
+            "count": added,
+        }
+        bar.progress(1.0, text=f"수집 완료 ({added}건)")
+        st.toast(f"[{start_d}~{end_d}] {added:,}건 수집완료")
+        st.rerun()
+
+    c_all, c_3y, c_1y, c_6m, c_3m = st.columns(5)
+    with c_all:
+        if st.button("전체", width="stretch", disabled=not can_collect, key="tracker_collect_all"):
+            try:
+                _run_collect("200601", skip_complete_months=True)
+            except Exception as exc:
+                st.error(str(exc))
+    with c_3y:
+        if st.button("최근 3년", width="stretch", disabled=not can_collect, key="tracker_collect_3y"):
+            try:
+                _run_collect(months_back(36), skip_complete_months=True)
+            except Exception as exc:
+                st.error(str(exc))
+    with c_1y:
+        if st.button("최근 1년", width="stretch", disabled=not can_collect, key="tracker_collect_1y"):
+            try:
+                _run_collect(months_back(12), skip_complete_months=True)
+            except Exception as exc:
+                st.error(str(exc))
+    with c_6m:
+        if st.button("최근 6개월", width="stretch", disabled=not can_collect, key="tracker_collect_6m"):
+            try:
+                _run_collect(months_back(6), skip_complete_months=False)
+            except Exception as exc:
+                st.error(str(exc))
+    with c_3m:
+        if st.button("최근 3개월", width="stretch", disabled=not can_collect, key="tracker_collect_3m"):
+            try:
+                _run_collect(months_back(3), skip_complete_months=False)
+            except Exception as exc:
+                st.error(str(exc))
+    if can_collect:
+        st.caption(
+            "전체·최근 3년·최근 1년은 시트에 해당 구의 해당 월 1일~말일 데이터가 있으면 건너뜁니다. "
+            "최근 6개월·최근 3개월은 항상 다시 수집합니다."
+        )
+    if not can_collect:
+        if not has_molit_api_key():
+            st.caption("국토부 API 키가 연결되면 수집할 수 있습니다.")
+        elif not tracked:
+            st.caption("구를 추가하면 수집 버튼이 활성화됩니다.")
+
+    st.markdown("#### 실거래 내역")
+    banner = st.session_state.get(SESSION_KEY_COLLECT_BANNER)
+    if banner:
+        start_d = banner.get("start", "")
+        end_d = banner.get("end", "")
+        count = int(banner.get("count", 0) or 0)
+        st.text(f"[{start_d}~{end_d}] {count:,}건 수집완료")
+    else:
+        st.caption("수집이 끝나면 기간과 건수가 여기에 표시됩니다.")
 
 
 # 페이지 설정
@@ -366,79 +941,14 @@ if selected_subway != "전체":
 # 결과 표시
 st.write(f"📊 검색 결과: {len(filtered_df)}개")
 
+MAIN_TABS = ["📋 목록", "🗺️ 지도", "📈 통계", "🔎 실거래가 조회", "🔒 실거래가 크롤링"]
+
 if len(filtered_df) > 0:
-    # 통계 정보
-    col1, col2, col3, col4, col5 = st.columns(5)
-    
-    with col1:
-        year_data = filtered_df['건축연도'].dropna()
-        if len(year_data) > 0:
-            st.metric("평균 건축연도", f"{int(year_data.mean())}년")
-        else:
-            st.metric("평균 건축연도", "N/A")
-    with col2:
-        household_data = filtered_df['세대수'].dropna()
-        if len(household_data) > 0:
-            st.metric("평균 세대수", f"{int(household_data.mean())}세대")
-        else:
-            st.metric("평균 세대수", "N/A")
-    with col3:
-        # 세대당 평균 평형 표시
-        if "세대당평균평형" in filtered_df.columns:
-            avg_pyeong_data = filtered_df["세대당평균평형"].dropna()
-            if len(avg_pyeong_data) > 0:
-                st.metric("평균 평형 (세대당)", f"{avg_pyeong_data.mean():.1f}평")
-            else:
-                # 세대당평균평형이 없으면 평형 컬럼 사용
-                if "평형" in filtered_df.columns:
-                    pyeong_data = filtered_df["평형"].dropna()
-                    if len(pyeong_data) > 0:
-                        st.metric("평균 평형", f"{pyeong_data.mean():.1f}평")
-                    else:
-                        st.metric("평균 평형", "N/A")
-                else:
-                    st.metric("평균 평형", "N/A")
-        else:
-            # 세대당평균평형 컬럼이 없으면 평형 컬럼 사용
-            if "평형" in filtered_df.columns:
-                pyeong_data = filtered_df["평형"].dropna()
-                if len(pyeong_data) > 0:
-                    st.metric("평균 평형", f"{pyeong_data.mean():.1f}평")
-                else:
-                    st.metric("평균 평형", "N/A")
-            else:
-                st.metric("평균 평형", "N/A")
-    with col4:
-        if "주차대수" in filtered_df.columns:
-            parking_data = filtered_df["주차대수"].dropna()
-            # 주차대수가 0인 경우도 포함 (0은 유효한 값)
-            parking_data = parking_data[parking_data >= 0]  # 음수 제외만
-            if len(parking_data) > 0:
-                st.metric("평균 주차대수", f"{int(parking_data.mean())}대")
-            else:
-                st.metric("평균 주차대수", "N/A")
-        else:
-            st.metric("평균 주차대수", "N/A")
-    with col5:
-        if "세대당주차면수" in filtered_df.columns:
-            parking_per_hh_data = filtered_df["세대당주차면수"].dropna()
-            if len(parking_per_hh_data) > 0:
-                st.metric("평균 세대당 주차면수", f"{parking_per_hh_data.mean():.2f}면")
-            else:
-                st.metric("평균 세대당 주차면수", "N/A")
-        else:
-            distance_data = filtered_df["지하철역거리_km"].dropna()
-            if len(distance_data) > 0:
-                st.metric("평균 지하철 거리", f"{distance_data.mean():.2f}km")
-            else:
-                st.metric("평균 지하철 거리", "N/A")
-    
-    st.markdown("---")
-    
-    # 탭 생성
-    tab1, tab2, tab3 = st.tabs(["📋 목록", "🗺️ 지도", "📈 통계"])
-    
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(MAIN_TABS)
+
     with tab1:
+        render_list_metrics(filtered_df)
+        st.markdown("---")
         # 기본 정렬: 건축연도 오름차순 (오래된순)
         if "건축연도" in filtered_df.columns:
             sorted_df = filtered_df.sort_values(
@@ -774,8 +1284,24 @@ if len(filtered_df) > 0:
                     mime="text/csv",
                     key="district_stats_download"
                 )
+
+    with tab4:
+        render_trade_browse()
+    with tab5:
+        render_tracker_tab(df)
 else:
     st.warning("조건에 맞는 아파트가 없습니다. 필터를 조정해주세요.")
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(MAIN_TABS)
+    with tab1:
+        st.info("검색 결과가 없습니다. 필터를 조정해주세요.")
+    with tab2:
+        st.info("검색 결과가 없습니다. 필터를 조정해주세요.")
+    with tab3:
+        st.info("검색 결과가 없습니다. 필터를 조정해주세요.")
+    with tab4:
+        render_trade_browse()
+    with tab5:
+        render_tracker_tab(df)
 
 # 사이드바 하단
 st.sidebar.markdown("---")
