@@ -686,11 +686,11 @@ def render_trade_browse(apartment_df=None) -> None:
     with gcol:
         grouped = st.radio(
             "전용면적 표시",
-            ["소수점 구분", "동일 전용면적 묶기"],
+            ["구분", "묶기"],
             index=1,
             horizontal=True,
-            key=f"browse_group_bundled_{query_key}",
-        ) == "동일 전용면적 묶기"
+            key=f"browse_group_mode_{query_key}",
+        ) == "묶기"
     areas = sorted(area_values(result_df, grouped).dropna().unique())
     area_labels = ["전체"] + [area_label(a, grouped) for a in areas]
     area_default = "전체"
