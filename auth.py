@@ -9,6 +9,7 @@ import hmac
 import streamlit as st
 
 SESSION_KEY_TRACKER_USER = "tracker_user"
+SESSION_KEY_LAST_LOGIN_ID = "tracker_last_login_id"
 
 
 def _as_user_map(section) -> dict:
@@ -80,11 +81,24 @@ def login_tracker(username: str, password: str) -> bool:
     if not hmac.compare_digest(str(expected).encode("utf-8"), pw.encode("utf-8")):
         return False
     st.session_state[SESSION_KEY_TRACKER_USER] = user
+    st.session_state[SESSION_KEY_LAST_LOGIN_ID] = user
     return True
 
 
 def logout_tracker() -> None:
     st.session_state.pop(SESSION_KEY_TRACKER_USER, None)
+
+
+def _default_login_id() -> str:
+    last = st.session_state.get(SESSION_KEY_LAST_LOGIN_ID)
+    if last:
+        return str(last).strip()
+    try:
+        from config import get_secret
+
+        return (get_secret("default_login_id") or "").strip()
+    except Exception:
+        return ""
 
 
 def render_tracker_login_panel(title="로그인", prefix="app") -> None:
@@ -97,8 +111,11 @@ def render_tracker_login_panel(title="로그인", prefix="app") -> None:
         st.warning("secrets.toml의 `[tracker_users]`에 계정을 추가하면 로그인할 수 있습니다.")
         return
 
-    with st.form(f"{prefix}_login_form", clear_on_submit=True):
-        username = st.text_input("아이디", key=f"{prefix}_login_id")
+    id_key = f"{prefix}_login_id"
+    if id_key not in st.session_state:
+        st.session_state[id_key] = _default_login_id()
+    with st.form(f"{prefix}_login_form", clear_on_submit=False):
+        username = st.text_input("아이디", key=id_key)
         password = st.text_input("비밀번호", type="password", key=f"{prefix}_login_pw")
         if st.form_submit_button("로그인", use_container_width=True):
             if login_tracker(username, password):
@@ -108,6 +125,15 @@ def render_tracker_login_panel(title="로그인", prefix="app") -> None:
 
 
 def render_app_login() -> None:
-    _, mid, _ = st.columns([1, 1.15, 1])
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"] {display:none;}
+        [data-testid="stSidebarCollapsedControl"] {display:none;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    _, mid, _ = st.columns([1, 2.2, 1])
     with mid:
         render_tracker_login_panel("서울 아파트 검색", "app")

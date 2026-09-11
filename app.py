@@ -2,9 +2,6 @@ from trade_controls import period_control, period_presets, period_slider, date_b
 from trade_compare import render_trade_compare
 from market_cycles import DOWN_YEARS, half_phase, market_phase, shade_downturns, annual_activity, phase_comparison, HISTORY_SOURCE
 from trade_metadata import complex_metadata
-"""
-서울 아파트 검색 앱 (Streamlit)
-"""
 import os
 import re
 from difflib import SequenceMatcher

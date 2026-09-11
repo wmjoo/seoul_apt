@@ -128,3 +128,13 @@ class AuthTests(unittest.TestCase):
              patch.object(auth.st, "session_state", {}):
             self.assertTrue(auth.login_tracker("tester", "한글암호!"))
             self.assertFalse(auth.login_tracker("tester", "다른암호"))
+
+    def test_login_keeps_last_id(self):
+        state = {}
+        with patch.object(auth, "get_tracker_users", return_value={"tester": "pw"}), \
+             patch.object(auth.st, "session_state", state):
+            self.assertTrue(auth.login_tracker("tester", "pw"))
+            self.assertEqual(state[auth.SESSION_KEY_LAST_LOGIN_ID], "tester")
+            auth.logout_tracker()
+            self.assertNotIn(auth.SESSION_KEY_TRACKER_USER, state)
+            self.assertEqual(state[auth.SESSION_KEY_LAST_LOGIN_ID], "tester")
