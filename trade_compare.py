@@ -35,10 +35,35 @@ def filter_comparison(frame, start, end, area="전체", exclude_first=False):
     left, right = date_bounds(start, end)
     result = frame.loc[pd.to_datetime(frame["계약일"]).between(left, right + pd.Timedelta(days=1), inclusive="left")]
     if area != "전체":
-        result = result.loc[area_values(result, True) == area]
+        result = result.loc[area_values(result, True) == int(area)]
     if exclude_first:
         result = result.loc[result["층_num"] != 1]
     return result
+
+
+def display_label(labels, key):
+    """Streamlit format_func/정렬 키는 None을 허용하지 않는다."""
+    label = labels.get(key)
+    if label:
+        return label
+    return str(key) if pd.notna(key) else "(단지 미상)"
+
+
+def complex_options(frame, labels):
+    values = (
+        frame["_complex"].dropna().astype(str).loc[lambda s: ~s.isin(["", "nan", "None", "<NA>"])]
+        .unique()
+        .tolist()
+    )
+    return sorted(values, key=lambda key: display_label(labels, key))
+
+
+def area_choices(shared):
+    return ["전체"] + [str(int(value)) for value in shared]
+
+
+def parse_area_choice(value):
+    return "전체" if value in (None, "전체") else int(value)
 
 
 def render_trade_compare(load_data, prepare, price_chart, volume_chart, apartments=None):
@@ -65,10 +90,13 @@ def render_trade_compare(load_data, prepare, price_chart, volume_chart, apartmen
     frame = frame.copy()
     frame["_complex"] = frame[identity].fillna("").astype(str).agg(" | ".join, axis=1)
     labels = complex_labels(frame, apartments)
-    options = sorted(frame["_complex"].unique(), key=labels.get)
+    options = complex_options(frame, labels)
+    if not options:
+        st.info("비교할 단지를 식별하지 못했습니다.")
+        return
     preferred_complex = next((x for x in options if all(s in x for s in ("성북구", "종암동", "종암에스케이"))), options[0])
     selected = st.multiselect("비교할 단지 (최대 3개)", options, default=[preferred_complex], max_selections=3,
-                             key="compare_complexes", format_func=labels.get)
+                             key="compare_complexes", format_func=lambda key: display_label(labels, key))
     if len(selected) < 2:
         st.info("단지를 2개 이상 선택하면 거래 내역을 나란히 비교합니다.")
         return
@@ -82,26 +110,32 @@ def render_trade_compare(load_data, prepare, price_chart, volume_chart, apartmen
     start, end = period_control(f"compare_period_{signature}")
     area_col, floor_col = st.columns([3, 1])
     shared = common_areas(frames)
-    area = area_col.selectbox("공통 전용면적 (개별 차트·건수)", ["전체"] + shared,
-                              format_func=lambda x: x if x == "전체" else f"{int(x)}㎡",
-                              key=f"compare_area_{signature}_{shared}")
+    area_options = area_choices(shared)
+    area = parse_area_choice(area_col.selectbox(
+        "공통 전용면적 (개별 차트·건수)", area_options,
+        format_func=lambda x: x if x == "전체" else f"{x}㎡",
+        key=f"compare_area_{signature}_{'_'.join(area_options)}",
+    ))
     exclude = floor_col.checkbox("1층 제외", key="compare_exclude_first")
     st.caption("소수점을 버린 정수 면적(59·84·114㎡)으로 묶어 공통 면적을 비교합니다. 전체는 각 단지의 모든 면적을 포함합니다.")
     if not shared:
         st.caption("공통 전용면적이 없어 전체 면적으로 비교합니다.")
     views = [filter_comparison(df, start, end, area, exclude) for df in frames]
-    named = [labels[x] for x in selected]
+    named = [display_label(labels, x) for x in selected]
     st.markdown("**반기별 거래 건수**")
     st.dataframe(half_year_activity(views, named, start, end),
                  hide_index=True, use_container_width=True)
     st.caption("현재 필터와 저장된 거래 기준입니다. 0건에는 미수집 기간이 포함될 수 있습니다.")
     st.markdown("**단지별 매매 실거래가 비교**")
     if shared:
+        overlay_options = [str(int(value)) for value in shared]
         overlay_default = preferred_overlay_area(frames, shared)
-        overlay_area = st.selectbox("통합 비교 차트 전용면적 (㎡)", shared,
-                                    index=shared.index(overlay_default) if overlay_default in shared else 0,
-                                    format_func=lambda x: f"{int(x)}㎡",
-                                    key=f"overlay_area_{signature}_{shared}")
+        overlay_index = overlay_options.index(str(int(overlay_default))) if overlay_default is not None and str(int(overlay_default)) in overlay_options else 0
+        overlay_area = parse_area_choice(st.selectbox(
+            "통합 비교 차트 전용면적 (㎡)", overlay_options, index=overlay_index,
+            format_func=lambda x: f"{x}㎡",
+            key=f"overlay_area_{signature}_{'_'.join(overlay_options)}",
+        ))
         overlay_views = [filter_comparison(df, start, end, overlay_area, exclude) for df in frames]
         st.plotly_chart(build_overlay(overlay_views, named, start, end, overlay_area),
                         use_container_width=True, key="compare_overlay",
@@ -115,7 +149,7 @@ def render_trade_compare(load_data, prepare, price_chart, volume_chart, apartmen
     columns = st.columns(len(selected))
     for i, (col, label, df) in enumerate(zip(columns, selected, views)):
         with col:
-            st.markdown(f"**{labels[label]}**")
+            st.markdown(f"**{display_label(labels, label)}**")
             st.caption(f"{start} ~ {end} · {len(df):,}건")
             fig = price_chart(df, "매매 실거래가", start, end)
             if not prices.empty:
@@ -141,22 +175,31 @@ def complex_labels(frame, apartments=None):
             count = pd.to_numeric(row.get("세대수"), errors="coerce")
             if pd.notna(count) and count > 0:
                 household_lookup.setdefault(key, set()).add(int(count))
+    first_rows = frame.drop_duplicates("_complex", keep="first")
+
+    def column(name):
+        if name in first_rows:
+            return first_rows[name]
+        return pd.Series([""] * len(first_rows), index=first_rows.index)
+
+    keys = first_rows["_complex"].astype(str)
+    names, gus, dongs, bunjis = column("아파트명"), column("구"), column("법정동"), column("지번")
+    own_counts = pd.to_numeric(column("세대수"), errors="coerce")
     labels = {}
-    first_rows = frame.drop_duplicates("_complex")
-    for _, row in first_rows.iterrows():
-        name, gu, dong = [str(row.get(c, "")).strip() for c in ("아파트명", "구", "법정동")]
+    for key, name, gu, dong, own_count in zip(keys, names, gus, dongs, own_counts):
+        if key in ("", "nan", "None", "<NA>"):
+            continue
+        name, gu, dong = [str(value).strip() for value in (name, gu, dong)]
         counts = household_lookup.get((name_key(name), gu, dong), set())
-        own_count = pd.to_numeric(row.get("세대수"), errors="coerce")
         if not counts and pd.notna(own_count) and own_count > 0:
             counts = {int(own_count)}
         household = f"{next(iter(counts)):,}세대" if len(counts) == 1 else "세대수 미상"
-        labels[row["_complex"]] = f"{name}({gu} {dong}) [{household}]"
+        labels[key] = f"{name}({gu} {dong}) [{household}]"
     # 이름/동이 같고 지번이 다른 경우에만 식별에 필요한 지번을 덧붙인다.
     duplicate_labels = pd.Series(list(labels.values())).value_counts()
-    for _, row in first_rows.iterrows():
-        key = row["_complex"]
-        if duplicate_labels[labels[key]] > 1:
-            labels[key] += f" · {row.get('지번', '')}"
+    for key, bunji in zip(keys, bunjis):
+        if key in labels and duplicate_labels[labels[key]] > 1:
+            labels[key] += f" · {bunji}"
     return labels
 
 
@@ -165,8 +208,8 @@ def half_year_activity(frames, labels, start, end):
                                 for m in pd.period_range(start, end, freq="M")))
     result = pd.DataFrame({"반기": [f"{year} {'상반기' if half == 1 else '하반기'}" for year, half in periods]})
     for label, frame in zip(labels, frames):
-        dates = pd.to_datetime(frame["계약일"])
-        counts = dates.map(lambda d: (d.year, 1 if d.month <= 6 else 2)).value_counts()
+        dates = pd.to_datetime(frame["계약일"], errors="coerce").dropna()
+        counts = dates.map(lambda d: (d.year, 1 if d.month <= 6 else 2)).value_counts().to_dict()
         result[label] = [int(counts.get(period, 0)) for period in periods]
     return result
 

@@ -1088,7 +1088,7 @@ if selected_subway != "전체":
 # 결과 표시
 
 
-MAIN_TABS = ["🔎 실거래가 조회", "⚖️ 단지 비교", "🔒 실거래가 크롤링", "📋 목록", "🗺️ 지도", "📈 통계"]
+MAIN_TABS = ["실거래가 조회", "단지 비교", "실거래가 크롤링", "목록", "지도", "통계"]
 
 if len(filtered_df) > 0:
     tab4, tab6, tab5, tab1, tab2, tab3 = st.tabs(MAIN_TABS)

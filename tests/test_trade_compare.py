@@ -6,6 +6,10 @@ from trade_compare import (
     preferred_overlay_area,
     overlay_colors,
     build_overlay,
+    display_label,
+    complex_options,
+    area_choices,
+    parse_area_choice,
 )
 
 
@@ -53,6 +57,16 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(len(set(three)), 3)
         self.assertEqual(two[0], three[0])
         self.assertNotEqual(two[0], two[1])
+
+    def test_label_and_area_helpers_never_return_none(self):
+        labels = {"a": "종암에스케이(성북구 종암동) [1,318세대]"}
+        frame = pd.DataFrame({"_complex": ["b", "a", None]})
+        options = complex_options(frame, labels)
+        self.assertEqual(options, ["b", "a"])
+        self.assertTrue(all(isinstance(display_label(labels, key), str) for key in options))
+        self.assertEqual(area_choices([59, 84]), ["전체", "59", "84"])
+        self.assertEqual(parse_area_choice("전체"), "전체")
+        self.assertEqual(parse_area_choice("84"), 84)
 
     def test_overlay_chart_has_trace_per_complex(self):
         frames = [
