@@ -24,6 +24,7 @@ from molit_trades import (
     collect_trades,
     current_ym,
     districts_needing_today_refresh,
+    ensure_trade_counts,
     has_molit_api_key,
     load_district_meta,
     load_trade_history,
@@ -232,6 +233,25 @@ def district_names_from_meta() -> list:
     if meta is None or meta.empty or "구" not in meta.columns:
         return []
     return [str(x).strip() for x in meta["구"].tolist() if str(x).strip()]
+
+
+def _format_meta_year_month(value) -> str:
+    text = str(value or "").replace("-", "").replace(".", "").strip()
+    if text in ("", "nan", "None", "<NA>"):
+        return ""
+    if len(text) >= 6 and text[:6].isdigit():
+        return f"{text[:4]}.{text[4:6]}"
+    return str(value)
+
+
+def _district_meta_view(meta: pd.DataFrame) -> pd.DataFrame:
+    view = meta.copy()
+    if "데이터건수" in view.columns:
+        view["데이터건수"] = pd.to_numeric(view["데이터건수"], errors="coerce").astype("Int64")
+    for col in ("완료시작연월", "완료종료연월"):
+        if col in view.columns:
+            view[col] = view[col].map(_format_meta_year_month)
+    return view
 
 
 def _remember_trades(merged) -> None:
@@ -834,7 +854,7 @@ def render_trade_tracker(apartment_df: pd.DataFrame = None) -> None:
     """로그인 사용자 전용 실거래 수집."""
     st.subheader("실거래가 크롤링")
     if is_sheets_configured():
-        st.caption("거래는 구 이름 시트에 저장하고, 수집 시점·완료 연월·자동업데이트는 `districts` 시트에서 관리합니다.")
+        st.caption("거래는 구 이름 시트에 저장하고, 건수·수집 시점·완료 연월·자동업데이트는 `districts` 시트에서 관리합니다.")
         sheet_url = spreadsheet_url()
         if sheet_url:
             st.link_button("Google 시트 열기", sheet_url)
@@ -856,9 +876,33 @@ def render_trade_tracker(apartment_df: pd.DataFrame = None) -> None:
     except Exception:
         st.error("추적 구를 불러오지 못했습니다. 저장소 연결을 확인해주세요.")
         return
+    try:
+        district_meta = ensure_trade_counts(district_meta)
+    except Exception:
+        pass
     st.markdown("#### 추적 구")
     if not district_meta.empty:
-        st.dataframe(district_meta, hide_index=True, use_container_width=True)
+        st.dataframe(
+            _district_meta_view(district_meta),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "데이터건수": st.column_config.NumberColumn("데이터건수", help="해당 구 시트에 저장된 실거래 행 수", format="%d"),
+                "완료시작연월": st.column_config.TextColumn(
+                    "수집완료 시작월",
+                    help="달이 끝난 뒤 이미 받아 둔 연속 구간의 첫 달입니다. 7개월 이상 수집할 때 이 구간은 건너뜁니다.",
+                ),
+                "완료종료연월": st.column_config.TextColumn(
+                    "수집완료 종료월",
+                    help="달이 끝난 뒤 이미 받아 둔 연속 구간의 마지막 달입니다. 당월은 거래가 더 들어올 수 있어 여기 넣지 않습니다.",
+                ),
+            },
+        )
+        st.caption(
+            "수집완료 시작·종료월은 달이 이미 끝난 뒤 받아 저장까지 끝난 연속 구간입니다. "
+            "7개월 이상 수집할 때는 이 달을 다시 받지 않고, 6개월 이하로 받으면 완료 구간이어도 다시 받습니다. "
+            "이번 달은 거래가 더 들어올 수 있어 완료로 치지 않습니다."
+        )
     if not tracked:
         st.info("아래에서 구를 추가한 뒤 수집을 실행하세요. 선택한 구의 거래가 전부 저장됩니다.")
     else:

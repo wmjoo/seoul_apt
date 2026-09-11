@@ -18,6 +18,7 @@ SHEET_COLLECTION_LOG = "collection_log"
 REG_DT_COL = "REG_DT"
 DISTRICT_META_COLS = [
     "구",
+    "데이터건수",
     "자동업데이트",
     "LAST_REG_DT",
     "최초 거래일",

@@ -386,6 +386,73 @@ def trade_date_bounds(df: pd.DataFrame, district: str) -> Tuple[str, str]:
     return dates.min().strftime("%Y-%m-%d"), dates.max().strftime("%Y-%m-%d")
 
 
+def trade_counts(df: pd.DataFrame) -> Dict[str, int]:
+    if df is None or df.empty or "구" not in df.columns:
+        return {}
+    return df["구"].astype(str).str.strip().value_counts().astype(int).to_dict()
+
+
+def _missing_count(value) -> bool:
+    if value is None or pd.isna(value):
+        return True
+    text = str(value).strip().replace(",", "")
+    if text in ("", "nan", "None", "<NA>"):
+        return True
+    try:
+        int(float(text))
+        return False
+    except (TypeError, ValueError):
+        return True
+
+
+def missing_trade_count_names(meta: Optional[pd.DataFrame] = None) -> List[str]:
+    frame = meta if meta is not None else load_district_meta()
+    if frame is None or frame.empty or "구" not in frame.columns:
+        return []
+    counts = frame["데이터건수"] if "데이터건수" in frame.columns else pd.Series([pd.NA] * len(frame), index=frame.index)
+    names = []
+    for name, value in zip(frame["구"], counts):
+        label = str(name).strip()
+        if label and _missing_count(value) and label not in names:
+            names.append(label)
+    return names
+
+
+def ensure_trade_counts(meta: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """Fill 데이터건수 in districts meta from stored trades when the column is empty."""
+    frame = load_district_meta() if meta is None else meta
+    missing = missing_trade_count_names(frame)
+    if not missing:
+        return frame
+    counts = trade_counts(load_trade_history(districts=missing))
+    updates = {name: {"데이터건수": int(counts.get(name, 0))} for name in missing}
+    order = [str(x).strip() for x in frame["구"].tolist()] if frame is not None and not frame.empty else missing
+    apply_district_meta_updates(updates, order=order)
+    return load_district_meta()
+
+
+def apply_district_meta_updates(updates: Dict[str, Dict], order: Optional[Sequence[str]] = None) -> None:
+    from sheets_store import DISTRICT_META_COLS, is_sheets_configured, update_district_meta
+
+    if is_sheets_configured():
+        update_district_meta(updates, order=list(order) if order is not None else None)
+        return
+    current = {str(row["구"]): row.to_dict() for _, row in load_district_meta().iterrows()}
+    names = list(order or [])
+    for name in list(updates) + list(current):
+        if name and name not in names:
+            names.append(name)
+    rows = []
+    for name in names:
+        row = current.get(name, {col: "" for col in DISTRICT_META_COLS})
+        row["구"] = name
+        for key, value in updates.get(name, {}).items():
+            if key in DISTRICT_META_COLS and key != "구" and value not in (None, ""):
+                row[key] = value
+        rows.append({col: row.get(col, "") for col in DISTRICT_META_COLS})
+    pd.DataFrame(rows, columns=DISTRICT_META_COLS).to_csv(TRACKED_DISTRICTS_CSV, index=False, encoding="utf-8-sig")
+
+
 def update_district_meta_from_trades(
     districts: Sequence[str],
     trades: pd.DataFrame,
@@ -395,10 +462,11 @@ def update_district_meta_from_trades(
     from sheets_store import DISTRICT_META_COLS, is_sheets_configured, update_district_meta
 
     stamp = stamp or format_seoul_stamp()
+    counts = trade_counts(trades)
     updates = {}
     for name in districts:
         first, last = trade_date_bounds(trades, name)
-        payload = {"LAST_REG_DT": stamp}
+        payload = {"LAST_REG_DT": stamp, "데이터건수": int(counts.get(name, 0))}
         if first:
             payload["최초 거래일"] = first
         if last:

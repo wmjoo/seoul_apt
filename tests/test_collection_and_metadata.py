@@ -85,6 +85,32 @@ class CollectionTests(unittest.TestCase):
             "구": ["성북구", "성북구", "강남구"],
             "계약일": ["2016-01-05", "2026-09-10", "2020-01-01"],
         }), "성북구"), ("2016-01-05", "2026-09-10"))
+        self.assertEqual(
+            m.trade_counts(pd.DataFrame({"구": ["성북구", "성북구", "동대문구"]})),
+            {"성북구": 2, "동대문구": 1},
+        )
+        self.assertEqual(
+            m.missing_trade_count_names(pd.DataFrame({
+                "구": ["성북구", "동대문구", "강남구"],
+                "데이터건수": [12, "", None],
+            })),
+            ["동대문구", "강남구"],
+        )
+
+    def test_meta_update_writes_trade_count(self):
+        trades = pd.DataFrame({
+            "구": ["성북구", "성북구", "동대문구"],
+            "계약일": ["2024-01-05", "2024-02-10", "2024-01-20"],
+        })
+        with patch("sheets_store.is_sheets_configured", return_value=True), \
+             patch("sheets_store.update_district_meta") as meta_update:
+            m.update_district_meta_from_trades(
+                ["성북구"], trades, stamp="2024-03-01 00:00:00",
+            )
+        payload = meta_update.call_args[0][0]["성북구"]
+        self.assertEqual(payload["데이터건수"], 2)
+        self.assertEqual(payload["최초 거래일"], "2024-01-05")
+        self.assertEqual(payload["최종 거래일"], "2024-02-10")
 
     def test_utc_server_clock_compares_seoul_calendar_day(self):
         from datetime import date, datetime
