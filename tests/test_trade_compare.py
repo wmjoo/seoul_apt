@@ -68,6 +68,22 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(parse_area_choice("전체"), "전체")
         self.assertEqual(parse_area_choice("84"), 84)
 
+    def test_default_compare_picks_jongam_sk_and_cheongnyangni_hansin(self):
+        from trade_compare import default_compare_picks
+        frame = pd.DataFrame([
+            {"구": "성북구", "법정동": "종암동", "아파트명": "종암에스케이", "지번": "130"},
+            {"구": "동대문구", "법정동": "청량리동", "아파트명": "청량리한신1차", "지번": "59"},
+            {"구": "동대문구", "법정동": "청량리동", "아파트명": "청량리한신", "지번": "60"},
+            {"구": "동대문구", "법정동": "장안동", "아파트명": "장안한신", "지번": "555"},
+        ])
+        picks = default_compare_picks(frame)
+        self.assertEqual([item["gu"] for item in picks], ["성북구", "동대문구"])
+        self.assertIn("종암에스케이", picks[0]["key"])
+        self.assertIn("청량리한신", picks[1]["key"])
+        self.assertNotIn("1차", picks[1]["key"])
+        self.assertIn("종암동", picks[0]["label"])
+        self.assertIn("청량리동", picks[1]["label"])
+
     def test_overlay_chart_has_trace_per_complex(self):
         frames = [
             pd.DataFrame({"계약일": pd.to_datetime(["2024-01-01", "2024-02-01", "2024-03-01", "2024-04-01"]),

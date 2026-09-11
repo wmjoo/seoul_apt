@@ -67,11 +67,59 @@ def parse_area_choice(value):
 
 SESSION_KEY_COMPARE_PICKED = "compare_picked"
 SESSION_KEY_COMPARE_SHOW = "compare_show"
+SESSION_KEY_COMPARE_SEEDED = "compare_seeded"
 COMPARE_MAX = 4
+DEFAULT_COMPARE_HINTS = (
+    {"gu": "성북구", "tokens": ("성북구", "종암동", "종암에스케이")},
+    {"gu": "동대문구", "tokens": ("동대문구", "청량리동", "한신"), "exclude": ("1차",)},
+)
 
 
 def _align_button():
     st.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
+
+
+def match_complex_key(options, tokens, exclude=()):
+    matches = [key for key in options if all(token in str(key) for token in tokens)]
+    if not matches:
+        return None
+    if exclude:
+        narrowed = [key for key in matches if not any(token in str(key) for token in exclude)]
+        if narrowed:
+            matches = narrowed
+    return sorted(matches, key=len)[0]
+
+
+def _with_complex_key(frame):
+    identity = [c for c in ["구", "법정동", "아파트명", "지번"] if c in frame]
+    if "아파트명" not in identity:
+        return pd.DataFrame()
+    result = frame.copy()
+    result["_complex"] = result[identity].fillna("").astype(str).agg(" | ".join, axis=1)
+    return result
+
+
+def default_compare_picks(frame, apartments=None, hints=DEFAULT_COMPARE_HINTS):
+    if frame is None or frame.empty:
+        return []
+    keyed = frame if "_complex" in frame.columns else _with_complex_key(frame)
+    if keyed.empty:
+        return []
+    labels = complex_labels(keyed, apartments)
+    options = complex_options(keyed, labels)
+    picks = []
+    seen = set()
+    for hint in hints:
+        key = match_complex_key(options, hint["tokens"], hint.get("exclude", ()))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        picks.append({
+            "key": key,
+            "gu": hint["gu"],
+            "label": display_label(labels, key),
+        })
+    return picks
 
 
 def render_trade_compare(load_data, prepare, price_chart, volume_chart, apartments=None, district_names=None):
@@ -82,6 +130,16 @@ def render_trade_compare(load_data, prepare, price_chart, volume_chart, apartmen
     if not names:
         st.info("저장된 실거래가 없습니다. 크롤링 탭에서 구를 추가해 주세요.")
         return
+    if not st.session_state.get(SESSION_KEY_COMPARE_SEEDED):
+        if not picked:
+            seed_gus = [hint["gu"] for hint in DEFAULT_COMPARE_HINTS if hint["gu"] in names]
+            if seed_gus:
+                try:
+                    seed_frame = prepare(load_data(force=refresh, districts=seed_gus))
+                except Exception:
+                    seed_frame = pd.DataFrame()
+                picked.extend(default_compare_picks(seed_frame, apartments))
+        st.session_state[SESSION_KEY_COMPARE_SEEDED] = True
     default_gu = "성북구" if "성북구" in names else names[0]
     gcol, ccol, add_col = st.columns([2.0, 3.4, 0.8])
     with gcol:
@@ -93,16 +151,14 @@ def render_trade_compare(load_data, prepare, price_chart, volume_chart, apartmen
         return
     options, labels = [], {}
     if not frame.empty:
-        identity = [c for c in ["구", "법정동", "아파트명", "지번"] if c in frame]
-        if "아파트명" in identity:
-            frame = frame.copy()
-            frame["_complex"] = frame[identity].fillna("").astype(str).agg(" | ".join, axis=1)
+        frame = _with_complex_key(frame)
+        if not frame.empty:
             labels = complex_labels(frame, apartments)
             picked_keys = {item["key"] for item in picked}
             options = [key for key in complex_options(frame, labels) if key not in picked_keys]
     with ccol:
         if options:
-            preferred = next((x for x in options if all(s in x for s in ("성북구", "종암동", "종암에스케이"))), options[0])
+            preferred = match_complex_key(options, DEFAULT_COMPARE_HINTS[0]["tokens"]) or options[0]
             selected_apt = st.selectbox(
                 "단지",
                 options,
@@ -165,11 +221,9 @@ def _frames_for_picked(picked, load_data, prepare, force):
     frame = prepare(load_data(force=force, districts=gus))
     if frame.empty:
         return frame, []
-    identity = [c for c in ["구", "법정동", "아파트명", "지번"] if c in frame]
-    if "아파트명" not in identity:
+    frame = _with_complex_key(frame)
+    if frame.empty:
         return pd.DataFrame(), []
-    frame = frame.copy()
-    frame["_complex"] = frame[identity].fillna("").astype(str).agg(" | ".join, axis=1)
     frames = [frame.loc[frame["_complex"] == item["key"]].copy() for item in picked]
     return frame, frames
 
