@@ -65,11 +65,25 @@ def parse_area_choice(value):
     return "전체" if value in (None, "전체") else int(value)
 
 
-def render_trade_compare(load_data, prepare, price_chart, volume_chart, apartments=None):
+def render_trade_compare(load_data, prepare, price_chart, volume_chart, apartments=None, district_names=None):
+    names = [str(x).strip() for x in (district_names or []) if str(x).strip()]
     _, refresh_col = st.columns([8, 2])
     refresh = refresh_col.button("최신 데이터 불러오기", key="compare_refresh", use_container_width=True)
+    if not names:
+        st.info("저장된 실거래가 없습니다. 크롤링 탭에서 구를 추가해 주세요.")
+        return
+    default_gu = "성북구" if "성북구" in names else names[0]
+    selected_gus = st.multiselect(
+        "구",
+        names,
+        default=[default_gu],
+        key="compare_gus",
+    )
+    if not selected_gus:
+        st.info("비교할 구를 선택하세요.")
+        return
     try:
-        frame = prepare(load_data(force=refresh))
+        frame = prepare(load_data(force=refresh, districts=selected_gus))
     except Exception:
         st.error("실거래 저장소를 읽지 못했습니다. 잠시 후 다시 불러와 주세요.")
         return
@@ -89,7 +103,7 @@ def render_trade_compare(load_data, prepare, price_chart, volume_chart, apartmen
         return
     preferred_complex = next((x for x in options if all(s in x for s in ("성북구", "종암동", "종암에스케이"))), options[0])
     selected = st.multiselect("비교할 단지 (최대 3개)", options, default=[preferred_complex], max_selections=3,
-                             key="compare_complexes", format_func=lambda key: display_label(labels, key))
+                             key=f"compare_complexes_{'_'.join(selected_gus)}", format_func=lambda key: display_label(labels, key))
     if len(selected) < 2:
         st.info("단지를 2개 이상 선택하면 거래 내역을 나란히 비교합니다.")
         return

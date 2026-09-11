@@ -427,14 +427,22 @@ def update_district_meta_from_trades(
     pd.DataFrame(rows, columns=DISTRICT_META_COLS).to_csv(TRACKED_DISTRICTS_CSV, index=False, encoding="utf-8-sig")
 
 
-def load_trade_history(path: str = TRADE_HISTORY_CSV) -> pd.DataFrame:
+def load_trade_history(
+    path: str = TRADE_HISTORY_CSV,
+    districts: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
     from sheets_store import is_sheets_configured, load_trades
 
+    names = list(districts) if districts is not None else None
     if is_sheets_configured():
-        return load_trades()
+        return load_trades(districts=names)
     if not os.path.exists(path):
         return pd.DataFrame()
-    return pd.read_csv(path, encoding="utf-8-sig")
+    frame = pd.read_csv(path, encoding="utf-8-sig")
+    if names and not frame.empty and "구" in frame.columns:
+        wanted = {str(x).strip() for x in names}
+        frame = frame.loc[frame["구"].astype(str).str.strip().isin(wanted)]
+    return frame
 
 
 def save_trade_history(
@@ -496,7 +504,7 @@ def collect_trades(
     months = month_range(start_ym, end_ym)
     client = MolitTradeClient()
     buffer: List[Dict] = []
-    existing = load_trade_history()
+    existing = load_trade_history(districts=district_list)
     jobs = [(d, ym) for d in district_list for ym in months]
     total = len(jobs)
     meta = load_district_meta()

@@ -90,6 +90,15 @@ def is_sheets_configured() -> bool:
     return bool(spreadsheet_id() and info.get("client_email") and info.get("private_key"))
 
 
+def _in_streamlit() -> bool:
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+        return get_script_run_ctx() is not None
+    except Exception:
+        return False
+
+
 def _with_sheets_retry(fn: Callable, retries: int = 6):
     last = None
     for i in range(retries):
@@ -105,7 +114,7 @@ def _with_sheets_retry(fn: Callable, retries: int = 6):
     raise RuntimeError("Google Sheets 분당 호출 한도를 넘었습니다. 1분 뒤 다시 시도하세요.") from last
 
 
-def _client():
+def _make_client():
     import gspread
     from google.oauth2.service_account import Credentials
 
@@ -120,11 +129,39 @@ def _client():
     return gspread.authorize(creds)
 
 
-def _spreadsheet():
+def _make_spreadsheet():
     sid = spreadsheet_id()
     if not sid:
         raise RuntimeError("secrets.toml에 sheets.spreadsheet_id 또는 GOOGLE_SHEET_ID가 없습니다.")
     return _with_sheets_retry(lambda: _client().open_by_key(sid))
+
+
+_CLIENT_RESOURCE = None
+_SPREADSHEET_RESOURCE = None
+_DISTRICT_META_CACHE = None
+_TRADES_CACHE = None
+
+
+def _client():
+    global _CLIENT_RESOURCE
+    if not _in_streamlit():
+        return _make_client()
+    import streamlit as st
+
+    if _CLIENT_RESOURCE is None:
+        _CLIENT_RESOURCE = st.cache_resource(show_spinner=False)(_make_client)
+    return _CLIENT_RESOURCE()
+
+
+def _spreadsheet():
+    global _SPREADSHEET_RESOURCE
+    if not _in_streamlit():
+        return _make_spreadsheet()
+    import streamlit as st
+
+    if _SPREADSHEET_RESOURCE is None:
+        _SPREADSHEET_RESOURCE = st.cache_resource(show_spinner=False)(_make_spreadsheet)
+    return _SPREADSHEET_RESOURCE()
 
 
 def spreadsheet_url() -> str:
@@ -344,13 +381,35 @@ def _import_collection_log_ranges(meta: pd.DataFrame) -> pd.DataFrame:
     return normalize_district_meta(out)
 
 
-def load_district_meta() -> pd.DataFrame:
+def clear_sheet_data_cache() -> None:
+    for cached in (_DISTRICT_META_CACHE, _TRADES_CACHE):
+        if cached is None:
+            continue
+        try:
+            cached.clear()
+        except Exception:
+            pass
+
+
+def _load_district_meta_uncached() -> pd.DataFrame:
     meta = normalize_district_meta(_read_df(SHEET_DISTRICTS))
     return _import_collection_log_ranges(meta)
 
 
+def load_district_meta() -> pd.DataFrame:
+    global _DISTRICT_META_CACHE
+    if not _in_streamlit():
+        return _load_district_meta_uncached()
+    import streamlit as st
+
+    if _DISTRICT_META_CACHE is None:
+        _DISTRICT_META_CACHE = st.cache_data(ttl=300, show_spinner=False)(_load_district_meta_uncached)
+    return _DISTRICT_META_CACHE()
+
+
 def save_district_meta(df: pd.DataFrame) -> None:
     _write_df(SHEET_DISTRICTS, normalize_district_meta(df))
+    clear_sheet_data_cache()
 
 
 def last_reg_dates(meta: Optional[pd.DataFrame] = None) -> Dict[str, date]:
@@ -389,8 +448,14 @@ def update_district_meta(updates: Dict[str, Dict[str, Any]], order: Optional[Lis
     save_district_meta(pd.DataFrame(rows, columns=DISTRICT_META_COLS))
 
 
-def load_trades() -> pd.DataFrame:
-    frames = [_normalize_trades(_read_df(title)) for title in _district_sheet_names()]
+def _load_trades_uncached(districts: Optional[tuple] = None) -> pd.DataFrame:
+    if districts is not None:
+        titles = [str(name).strip() for name in districts if str(name).strip()]
+        if not titles:
+            return pd.DataFrame()
+    else:
+        titles = _district_sheet_names()
+    frames = [_normalize_trades(_read_existing_df(title)) for title in titles]
     frames = [f for f in frames if f is not None and not f.empty]
     if not frames:
         return pd.DataFrame()
@@ -399,6 +464,23 @@ def load_trades() -> pd.DataFrame:
     if subset:
         out = out.drop_duplicates(subset, keep="last")
     return out.reset_index(drop=True)
+
+
+def load_trades(districts: Optional[List[str]] = None) -> pd.DataFrame:
+    global _TRADES_CACHE
+    if districts is not None:
+        key = tuple(str(x).strip() for x in districts if str(x).strip())
+        if not key:
+            return pd.DataFrame()
+    else:
+        key = None
+    if not _in_streamlit():
+        return _load_trades_uncached(key)
+    import streamlit as st
+
+    if _TRADES_CACHE is None:
+        _TRADES_CACHE = st.cache_data(ttl=300, show_spinner=False)(_load_trades_uncached)
+    return _TRADES_CACHE(key)
 
 
 def save_trades(df: pd.DataFrame, districts: Optional[List[str]] = None) -> None:
@@ -412,9 +494,11 @@ def save_trades(df: pd.DataFrame, districts: Optional[List[str]] = None) -> None
         for name in districts:
             part = groups.loc[groups["_sheet"] == name].drop(columns=["_sheet"])
             _write_df(name, _move_reg_dt_last(part))
+        clear_sheet_data_cache()
         return
     if df.empty or "구" not in df.columns:
         _write_df(SHEET_TRADES, _move_reg_dt_last(df))
+        clear_sheet_data_cache()
         return
     groups = df.copy()
     groups["_sheet"] = groups["구"].astype(str).str.strip()
@@ -422,6 +506,7 @@ def save_trades(df: pd.DataFrame, districts: Optional[List[str]] = None) -> None
     for name in targets:
         part = groups.loc[groups["_sheet"] == name].drop(columns=["_sheet"])
         _write_df(name, _move_reg_dt_last(part))
+    clear_sheet_data_cache()
 
 
 def load_districts() -> List[str]:

@@ -79,6 +79,24 @@ class StorageTests(unittest.TestCase):
         self.assertIn("강남구", set(saved["구"]))
         self.assertEqual(sheets.last_reg_date("성북구", existing), pd.Timestamp("2026-09-10").date())
 
+    def test_load_trades_reads_only_requested_district_sheets(self):
+        reads = []
+
+        def fake_read(title):
+            reads.append(title)
+            return pd.DataFrame({"구": [title], "계약일": ["2026-01-01"], "아파트명": ["A"]})
+
+        with patch.object(sheets, "_read_existing_df", side_effect=fake_read), \
+             patch.object(sheets, "_district_sheet_names", return_value=["성북구", "강남구", "송파구"]):
+            out = sheets.load_trades(districts=["성북구"])
+        self.assertEqual(reads, ["성북구"])
+        self.assertEqual(out["구"].tolist(), ["성북구"])
+        reads.clear()
+        with patch.object(sheets, "_read_existing_df", side_effect=fake_read), \
+             patch.object(sheets, "_district_sheet_names", return_value=["성북구", "강남구"]):
+            sheets.load_trades()
+        self.assertEqual(reads, ["성북구", "강남구"])
+
     def test_permission_error_does_not_create_worksheet(self):
         book = Mock()
         book.worksheet.side_effect = PermissionError()

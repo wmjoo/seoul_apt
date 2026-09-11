@@ -34,13 +34,14 @@ from molit_trades import (
     save_tracked_districts,
     ym_to_date_span,
 )
-from sheets_store import auto_update_enabled, is_sheets_configured, spreadsheet_url, update_district_meta
+from sheets_store import auto_update_enabled, clear_sheet_data_cache, is_sheets_configured, spreadsheet_url, update_district_meta
 from utils import extract_dong
 
 # 새로 수집한 데이터를 세션에 넣어두는 키 (Cloud에서 파일 저장이 안 돼도 새로고침 반영)
 SESSION_KEY_APARTMENT_DATA = "apartment_data"
 SESSION_KEY_COLLECT_BANNER = "tracker_collect_banner"
 SESSION_KEY_TRADES_CACHE = "cached_trades_df"
+SESSION_KEY_TRADES_BY_DISTRICT = "cached_trades_by_district"
 SESSION_KEY_BROWSE_QUERY = "browse_trade_query"
 SESSION_KEY_DAILY_SYNC = "daily_trade_sync_done"
 # 메인 아파트(실거래가) 단지명 유사도 매칭 임계값 (0~1). 0.75로 완화해 매칭률 상승
@@ -191,8 +192,8 @@ def ensure_daily_trade_sync() -> None:
             on_progress=on_progress,
             skip_complete_months=False,
         )
-        st.session_state[SESSION_KEY_TRADES_CACHE] = merged
         bar.progress(1.0, text=f"{', '.join(stale)} {month_label} 완료")
+        _remember_trades(merged)
         st.rerun()
     except Exception as exc:
         bar.progress(1.0, text="자동 업데이트 실패")
@@ -226,14 +227,52 @@ def render_settings_tab() -> None:
                 st.rerun()
 
 
-def get_cached_trades(force: bool = False) -> pd.DataFrame:
-    """실거래 이력을 세션에 캐시한다. (탭이 매 실행마다 그려져도 시트를 반복 조회하지 않음)"""
-    if force or SESSION_KEY_TRADES_CACHE not in st.session_state:
-        st.session_state[SESSION_KEY_TRADES_CACHE] = load_trade_history()
-    cached = st.session_state[SESSION_KEY_TRADES_CACHE]
-    if cached is None:
+def district_names_from_meta() -> list:
+    try:
+        meta = load_district_meta()
+    except Exception:
+        return []
+    if meta is None or meta.empty or "구" not in meta.columns:
+        return []
+    return [str(x).strip() for x in meta["구"].tolist() if str(x).strip()]
+
+
+def _remember_trades(merged) -> None:
+    st.session_state[SESSION_KEY_TRADES_CACHE] = merged
+    store = st.session_state.setdefault(SESSION_KEY_TRADES_BY_DISTRICT, {})
+    if merged is None or getattr(merged, "empty", True) or "구" not in merged.columns:
+        return
+    for name, part in merged.groupby(merged["구"].astype(str).str.strip(), dropna=False):
+        label = str(name).strip()
+        if label:
+            store[label] = part.copy()
+
+
+def get_cached_trades(force: bool = False, districts=None) -> pd.DataFrame:
+    """선택한 구 시트만 읽고, 세션·ttl 캐시에 둔다."""
+    names = [str(x).strip() for x in (districts or []) if str(x).strip()]
+    store = st.session_state.setdefault(SESSION_KEY_TRADES_BY_DISTRICT, {})
+    if not names:
         return pd.DataFrame()
-    return cached
+    if force:
+        clear_sheet_data_cache()
+        for name in names:
+            store.pop(name, None)
+    missing = [name for name in names if name not in store]
+    if missing:
+        loaded = load_trade_history(districts=missing)
+        for name in missing:
+            if loaded is None or loaded.empty:
+                store[name] = pd.DataFrame()
+            elif "구" in loaded.columns:
+                store[name] = loaded.loc[loaded["구"].astype(str).str.strip() == name].copy()
+            else:
+                store[name] = loaded.copy()
+    frames = [store[name] for name in names if name in store]
+    frames = [frame for frame in frames if frame is not None and not frame.empty]
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
 
 
 def render_list_metrics(filtered_df: pd.DataFrame) -> None:
@@ -597,35 +636,34 @@ def _build_volume_chart(df: pd.DataFrame, ym_start: str, ym_end: str, palette_ar
 
 def render_trade_browse(apartment_df=None) -> None:
     """로그인 후 실거래 내역을 조회한다."""
+    names = district_names_from_meta()
     _, refresh_col = st.columns([8, 2])
     refresh = refresh_col.button("최신 데이터 불러오기", key="browse_refresh", use_container_width=True)
+    if not names:
+        st.info("저장된 실거래가 없습니다. 실거래가 크롤링 탭에서 구를 추가하고 수집하면 여기에 표시됩니다.")
+        return
+    default_gu = "성북구" if "성북구" in names else names[0]
+    gcol, dcol, acol, bcol = st.columns([2.3, 2.3, 3.1, 0.9])
+    with gcol:
+        selected_gu = st.selectbox(
+            "구",
+            names,
+            index=names.index(default_gu) if default_gu in names else 0,
+            key="browse_gu_filter",
+        )
     try:
-        trades_df = get_cached_trades(force=refresh)
+        trades_df = get_cached_trades(force=refresh, districts=[selected_gu])
     except Exception:
         st.error("실거래 저장소를 읽지 못했습니다. 잠시 후 최신 데이터 불러오기를 눌러주세요.")
         return
     if trades_df.empty:
-        st.info("저장된 실거래가 없습니다. 실거래가 크롤링 탭에서 수집하면 여기에 표시됩니다.")
+        st.info(f"{selected_gu} 시트의 실거래가 없습니다. 크롤링 탭에서 수집하면 여기에 표시됩니다.")
         return
 
     trades_df = _prepare_browse_trades(trades_df)
     dong_col = _dong_col(trades_df)
     apt_col = _apt_col(trades_df)
-    gu_values = _unique_labels(trades_df["구"]) if "구" in trades_df.columns else []
-    gu_options = ["전체"] + gu_values
-    default_gu = "성북구" if "성북구" in gu_values else (gu_values[0] if gu_values else "전체")
-
-    gcol, dcol, acol, bcol = st.columns([2.3, 2.3, 3.1, 0.9])
-    with gcol:
-        selected_gu = st.selectbox(
-            "구",
-            gu_options,
-            index=gu_options.index(default_gu) if default_gu in gu_options else 0,
-            key="browse_gu_filter",
-        )
-    gu_df = trades_df if selected_gu == "전체" or "구" not in trades_df.columns else trades_df[
-        trades_df["구"].astype(str).str.strip() == selected_gu
-    ]
+    gu_df = trades_df
     dong_options = ["전체"]
     if dong_col:
         dong_options += _unique_labels(gu_df[dong_col])
@@ -873,7 +911,7 @@ def render_trade_tracker(apartment_df: pd.DataFrame = None) -> None:
         )
         added = merged.attrs.get("collected_count", 0)
         start_d, end_d = ym_to_date_span(start_ym, end_ym)
-        st.session_state[SESSION_KEY_TRADES_CACHE] = merged
+        _remember_trades(merged)
         st.session_state[SESSION_KEY_COLLECT_BANNER] = {
             "start": start_d,
             "end": end_d,
@@ -951,6 +989,9 @@ def load_data():
         data_type = "generated"
 
     df = preprocess_apartment_df(df)
+    if "동" not in df.columns and "주소" in df.columns:
+        df["동"] = df["주소"].apply(extract_dong)
+    df = enrich_with_main_apt(df, "seoul_disrict_main_apt.csv")
     return df, data_type, len(df)
 
 
@@ -964,21 +1005,6 @@ df, data_type, data_count = load_data()
 #     st.toast("샘플 데이터를 사용 중입니다.", icon="⚠️")
 # elif data_type == "generated":
 #     st.toast("데이터 파일이 없습니다. 샘플 데이터를 생성합니다...", icon="ℹ️")
-
-# 동 정보 추가 (없으면 생성)
-if "동" not in df.columns:
-    df["동"] = df["주소"].apply(extract_dong)
-
-# 메인 아파트(실거래가) CSV와 동 정규화 + 단지명 유사도 매칭으로 평수/실거래가/기준연월일 추가
-_main_apt_file = "seoul_disrict_main_apt.csv"
-if not os.path.exists(_main_apt_file):
-    try:
-        _alt = os.path.join(os.path.dirname(os.path.abspath(__file__)), _main_apt_file)
-        if os.path.exists(_alt):
-            _main_apt_file = _alt
-    except NameError:
-        pass
-df = enrich_with_main_apt(df, _main_apt_file)
 
 st.markdown("""
 <style>
@@ -1167,11 +1193,30 @@ if selected_subway != "전체":
 
 
 MAIN_TABS = ["실거래가 조회", "단지 비교", "실거래가 크롤링", "목록", "지도", "통계", "설정"]
+view = st.radio("화면", MAIN_TABS, horizontal=True, key="main_view", label_visibility="collapsed")
+if not view:
+    view = MAIN_TABS[0]
 
-if len(filtered_df) > 0:
-    tab4, tab6, tab5, tab1, tab2, tab3, tab7 = st.tabs(MAIN_TABS)
-
-    with tab1:
+if view == "실거래가 조회":
+    render_trade_browse(df)
+elif view == "단지 비교":
+    render_trade_compare(
+        get_cached_trades,
+        _prepare_browse_trades,
+        _build_trade_chart,
+        _build_volume_chart,
+        df,
+        district_names=district_names_from_meta(),
+    )
+elif view == "실거래가 크롤링":
+    render_tracker_tab(df)
+elif view == "설정":
+    render_settings_tab()
+elif view == "목록":
+    if len(filtered_df) == 0:
+        st.warning("조건에 맞는 아파트가 없습니다. 필터를 조정해주세요.")
+        st.info("검색 결과가 없습니다. 필터를 조정해주세요.")
+    else:
         render_list_metrics(filtered_df)
         st.markdown("---")
         # 기본 정렬: 건축연도 오름차순 (오래된순)
@@ -1292,7 +1337,10 @@ if len(filtered_df) > 0:
             mime="text/csv"
         )
     
-    with tab2:
+elif view == "지도":
+    if len(filtered_df) == 0:
+        st.info("표시할 데이터가 없습니다.")
+    else:
         # 지도 생성
         if len(filtered_df) > 0:
             # 필터링된 데이터의 유효한 좌표만 사용하여 중심점 계산
@@ -1381,7 +1429,10 @@ if len(filtered_df) > 0:
         else:
             st.info("표시할 데이터가 없습니다.")
     
-    with tab3:
+elif view == "통계":
+    if len(filtered_df) == 0:
+        st.info("검색 결과가 없습니다. 필터를 조정해주세요.")
+    else:
         st.info("💡 통계는 필터링과 무관하게 전체 데이터 기준으로 표시됩니다.")
         
         col1, col2 = st.columns(2)
@@ -1509,32 +1560,6 @@ if len(filtered_df) > 0:
                     mime="text/csv",
                     key="district_stats_download"
                 )
-
-    with tab4:
-        render_trade_browse(df)
-    with tab6:
-        render_trade_compare(get_cached_trades, _prepare_browse_trades, _build_trade_chart, _build_volume_chart, df)
-    with tab5:
-        render_tracker_tab(df)
-    with tab7:
-        render_settings_tab()
-else:
-    st.warning("조건에 맞는 아파트가 없습니다. 필터를 조정해주세요.")
-    tab4, tab6, tab5, tab1, tab2, tab3, tab7 = st.tabs(MAIN_TABS)
-    with tab1:
-        st.info("검색 결과가 없습니다. 필터를 조정해주세요.")
-    with tab2:
-        st.info("검색 결과가 없습니다. 필터를 조정해주세요.")
-    with tab3:
-        st.info("검색 결과가 없습니다. 필터를 조정해주세요.")
-    with tab4:
-        render_trade_browse(df)
-    with tab6:
-        render_trade_compare(get_cached_trades, _prepare_browse_trades, _build_trade_chart, _build_volume_chart, df)
-    with tab5:
-        render_tracker_tab(df)
-    with tab7:
-        render_settings_tab()
 
 # 사이드바 하단
 st.sidebar.markdown("---")
