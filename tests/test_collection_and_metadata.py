@@ -7,11 +7,15 @@ from trade_metadata import complex_metadata
 
 class CollectionTests(unittest.TestCase):
     def test_completion_requires_closed_month(self):
-        log = pd.DataFrame([
-            {"구": "성북구", "연월": "202401", "수집시각": "2024-01-31T23:59:00"},
-            {"구": "성북구", "연월": "202402", "수집시각": "2024-03-01T00:00:00"},
+        meta = pd.DataFrame([
+            {"구": "성북구", "완료시작연월": "202402", "완료종료연월": "202402"},
         ])
-        self.assertEqual(m.completed_months(log), {("성북구", "202402")})
+        self.assertEqual(m.completed_months(meta), {("성북구", "202402")})
+        self.assertFalse(m.is_closed_month("202401", "2024-01-31T23:59:00"))
+        self.assertTrue(m.is_closed_month("202402", "2024-03-01T00:00:00"))
+        self.assertEqual(m.extend_completed_range("", "", "202401"), ("202401", "202401"))
+        self.assertEqual(m.extend_completed_range("202401", "202401", "202402"), ("202401", "202402"))
+        self.assertEqual(m.extend_completed_range("202401", "202401", "202403"), ("202401", "202401"))
 
     def test_replace_preserves_equal_real_trades_and_other_months(self):
         old = pd.DataFrame([
@@ -28,34 +32,38 @@ class CollectionTests(unittest.TestCase):
     def test_failed_save_never_marks_completion(self):
         with patch.object(m, "has_molit_api_key", return_value=True), \
              patch.object(m, "load_trade_history", return_value=pd.DataFrame()), \
-             patch.object(m, "load_collection_log", return_value=pd.DataFrame()), \
+             patch.object(m, "load_district_meta", return_value=pd.DataFrame()), \
              patch.object(m, "MolitTradeClient") as client, \
              patch.object(m.time, "sleep"), \
              patch.object(m, "save_trade_history", side_effect=RuntimeError("failed")), \
-             patch.object(m, "save_collection_log") as log, \
              patch.object(m, "update_district_meta_from_trades") as meta:
             client.return_value.fetch_month.return_value = []
             with self.assertRaises(RuntimeError):
                 m.collect_trades(["성북구"], "202401", "202401")
-            log.assert_not_called()
             meta.assert_not_called()
 
     def test_zero_trade_month_is_recorded_and_force_refetches(self):
-        completed = pd.DataFrame([{"구": "성북구", "연월": "202401",
-                                    "수집시각": "2024-02-02", "건수": 0}])
+        completed = pd.DataFrame([{
+            "구": "성북구",
+            "자동업데이트": "OFF",
+            "LAST_REG_DT": "2024-02-02",
+            "최초 거래일": "",
+            "최종 거래일": "",
+            "완료시작연월": "202401",
+            "완료종료연월": "202401",
+        }])
         for skip in [True, False]:
             with patch.object(m, "has_molit_api_key", return_value=True), \
                  patch.object(m, "load_trade_history", return_value=pd.DataFrame()), \
-                 patch.object(m, "load_collection_log", return_value=completed), \
+                 patch.object(m, "load_district_meta", return_value=completed), \
                  patch.object(m, "MolitTradeClient") as client, \
                  patch.object(m.time, "sleep"), \
                  patch.object(m, "save_trade_history"), \
-                 patch.object(m, "save_collection_log") as log, \
-                 patch.object(m, "update_district_meta_from_trades"):
+                 patch.object(m, "update_district_meta_from_trades") as meta:
                 client.return_value.fetch_month.return_value = []
                 m.collect_trades(["성북구"], "202401", "202401", skip_complete_months=skip)
                 self.assertEqual(client.return_value.fetch_month.call_count, 0 if skip else 1)
-                self.assertEqual(log.call_count, 0 if skip else 1)
+                self.assertEqual(meta.call_count, 0 if skip else 1)
 
     def test_reg_dt_stamp_and_stale_districts(self):
         when = pd.Timestamp("2026-09-11 09:00:00").to_pydatetime()
@@ -93,6 +101,20 @@ class CollectionTests(unittest.TestCase):
         meta = pd.DataFrame({"구": ["성북구"], "LAST_REG_DT": [stamp]})
         self.assertEqual(m.last_reg_date("성북구", meta), date(2026, 9, 11))
         self.assertEqual(m.districts_needing_today_refresh(["성북구"], date(2026, 9, 11), meta), [])
+
+    def test_auto_update_uses_on_districts_only(self):
+        from datetime import date
+
+        meta = pd.DataFrame({
+            "구": ["성북구", "강남구", "송파구"],
+            "자동업데이트": ["ON", "OFF", "예"],
+            "LAST_REG_DT": ["", "", ""],
+        })
+        self.assertEqual(m.auto_update_districts(meta), ["성북구", "송파구"])
+        self.assertEqual(
+            m.districts_needing_today_refresh(m.auto_update_districts(meta), date(2026, 9, 11), meta),
+            ["성북구", "송파구"],
+        )
 
     def test_metadata_alias_and_missing_columns(self):
         trades = pd.DataFrame([{"아파트명": "종암에스케이", "구": "성북구",

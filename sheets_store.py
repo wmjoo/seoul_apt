@@ -16,7 +16,15 @@ SHEET_TRADES = "trades"
 SHEET_DISTRICTS = "districts"
 SHEET_COLLECTION_LOG = "collection_log"
 REG_DT_COL = "REG_DT"
-DISTRICT_META_COLS = ["구", "LAST_REG_DT", "최초 거래일", "최종 거래일"]
+DISTRICT_META_COLS = [
+    "구",
+    "자동업데이트",
+    "LAST_REG_DT",
+    "최초 거래일",
+    "최종 거래일",
+    "완료시작연월",
+    "완료종료연월",
+]
 RESERVED_SHEETS = frozenset({SHEET_TRADES, SHEET_DISTRICTS, SHEET_COLLECTION_LOG})
 
 
@@ -227,22 +235,118 @@ def empty_district_meta() -> pd.DataFrame:
     return pd.DataFrame(columns=DISTRICT_META_COLS)
 
 
+def auto_update_enabled(value) -> bool:
+    return str(value).strip().upper() in {"ON", "TRUE", "1", "Y", "YES", "예", "켜짐"}
+
+
 def normalize_district_meta(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return empty_district_meta()
     out = df.copy()
+    if "district" in out.columns and "구" not in out.columns:
+        out = out.rename(columns={"district": "구"})
     if "구" not in out.columns:
         return empty_district_meta()
+    if "자동업데이트" not in out.columns and "auto_update" in out.columns:
+        out["자동업데이트"] = out["auto_update"]
+    if "완료시작연월" not in out.columns and "complete_from" in out.columns:
+        out["완료시작연월"] = out["complete_from"]
+    if "완료종료연월" not in out.columns and "complete_to" in out.columns:
+        out["완료종료연월"] = out["complete_to"]
     for col in DISTRICT_META_COLS:
         if col not in out.columns:
             out[col] = pd.NA
     out["구"] = out["구"].astype(str).str.strip()
     out = out.loc[out["구"].ne("") & ~out["구"].isin(["nan", "None", "<NA>"])]
+    out["자동업데이트"] = [
+        "ON" if auto_update_enabled(value) else "OFF" for value in out["자동업데이트"]
+    ]
     return out[DISTRICT_META_COLS].drop_duplicates("구", keep="last").reset_index(drop=True)
 
 
+def _next_year_month(year_month: str) -> str:
+    year, month = int(year_month[:4]), int(year_month[4:6])
+    month += 1
+    if month > 12:
+        year, month = year + 1, 1
+    return f"{year:04d}{month:02d}"
+
+
+def _closed_month(year_month: str, collected_at) -> bool:
+    if not year_month or len(str(year_month)) < 6 or pd.isna(collected_at):
+        return False
+    stamp = pd.Timestamp(collected_at)
+    next_month = pd.Timestamp(f"{str(year_month)[:4]}-{str(year_month)[4:6]}-01") + pd.offsets.MonthBegin(1)
+    return stamp >= next_month
+
+
+def _read_existing_df(title: str) -> pd.DataFrame:
+    """Read a worksheet only if it already exists. Never create a leftover sheet."""
+    try:
+        book = _spreadsheet()
+        ws = _with_sheets_retry(lambda: book.worksheet(title))
+    except Exception:
+        return pd.DataFrame()
+    values = _with_sheets_retry(ws.get_all_values)
+    if not values or len(values) < 2:
+        if values and values[0]:
+            return pd.DataFrame(columns=values[0])
+        return pd.DataFrame()
+    return pd.DataFrame(values[1:], columns=values[0]).replace("", pd.NA)
+
+
+def _import_collection_log_ranges(meta: pd.DataFrame) -> pd.DataFrame:
+    """One-shot: copy completed months from the old collection_log sheet into districts."""
+    if meta.empty or "완료시작연월" not in meta.columns:
+        has_ranges = False
+    else:
+        has_ranges = not meta["완료시작연월"].fillna("").astype(str).str.strip().eq("").all()
+    if has_ranges:
+        return meta
+    try:
+        log = _read_existing_df(SHEET_COLLECTION_LOG)
+    except Exception:
+        return meta
+    if log is None or log.empty or "구" not in log.columns or "연월" not in log.columns:
+        return meta
+    collected_at = log["수집시각"] if "수집시각" in log.columns else pd.Series("", index=log.index)
+    completed: dict[str, list[str]] = {}
+    for idx, row in log.iterrows():
+        district = str(row.get("구", "")).strip()
+        year_month = str(row.get("연월", "")).replace("-", "")[:6]
+        if not district or len(year_month) < 6:
+            continue
+        if _closed_month(year_month, collected_at.loc[idx] if idx in collected_at.index else ""):
+            completed.setdefault(district, []).append(year_month)
+    if not completed:
+        return meta
+    out = meta.copy()
+    known = set(out["구"].astype(str))
+    for district, months in completed.items():
+        months = sorted(set(months))
+        start, last, expected = months[0], months[0], months[0]
+        for year_month in months:
+            if year_month == expected:
+                last = year_month
+                expected = _next_year_month(expected)
+            elif year_month > expected:
+                break
+        if district not in known:
+            out = pd.concat(
+                [out, pd.DataFrame([{col: "" for col in DISTRICT_META_COLS} | {"구": district}])],
+                ignore_index=True,
+            )
+            known.add(district)
+        mask = out["구"].astype(str) == district
+        out.loc[mask, "완료시작연월"] = start
+        out.loc[mask, "완료종료연월"] = last
+    save_district_meta(out)
+    return normalize_district_meta(out)
+
+
 def load_district_meta() -> pd.DataFrame:
-    return normalize_district_meta(_read_df(SHEET_DISTRICTS))
+    meta = normalize_district_meta(_read_df(SHEET_DISTRICTS))
+    return _import_collection_log_ranges(meta)
 
 
 def save_district_meta(df: pd.DataFrame) -> None:

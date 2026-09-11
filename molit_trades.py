@@ -303,6 +303,80 @@ def districts_needing_today_refresh(
     return [name for name in districts if last_reg_date(name, frame) != today]
 
 
+def auto_update_districts(meta: Optional[pd.DataFrame] = None) -> List[str]:
+    from sheets_store import auto_update_enabled
+
+    frame = load_district_meta() if meta is None else meta
+    if frame is None or frame.empty or "구" not in frame.columns:
+        return []
+    names = []
+    for _, row in frame.iterrows():
+        name = str(row.get("구", "")).strip()
+        if name and auto_update_enabled(row.get("자동업데이트", "")):
+            names.append(name)
+    return names
+
+
+def next_ym(year_month: str) -> str:
+    year, month = int(year_month[:4]), int(year_month[4:6])
+    month += 1
+    if month > 12:
+        year, month = year + 1, 1
+    return f"{year:04d}{month:02d}"
+
+
+def prev_ym(year_month: str) -> str:
+    year, month = int(year_month[:4]), int(year_month[4:6])
+    month -= 1
+    if month < 1:
+        year, month = year - 1, 12
+    return f"{year:04d}{month:02d}"
+
+
+def is_closed_month(year_month: str, collected_at) -> bool:
+    ym = str(year_month or "").replace("-", "")[:6]
+    if len(ym) < 6 or collected_at in (None, "") or pd.isna(collected_at):
+        return False
+    try:
+        stamp = pd.Timestamp(collected_at)
+        next_month = pd.Timestamp(f"{ym[:4]}-{ym[4:6]}-01") + pd.offsets.MonthBegin(1)
+    except (ValueError, TypeError):
+        return False
+    return stamp >= next_month
+
+
+def extend_completed_range(start: str, end: str, year_month: str) -> Tuple[str, str]:
+    start, end = str(start or "").replace("-", "")[:6], str(end or "").replace("-", "")[:6]
+    ym = str(year_month or "").replace("-", "")[:6]
+    if len(ym) < 6:
+        return start, end
+    if len(start) < 6 or len(end) < 6:
+        return ym, ym
+    if start <= ym <= end:
+        return start, end
+    if ym == next_ym(end):
+        return start, ym
+    if ym == prev_ym(start):
+        return ym, end
+    return start, end
+
+
+def completed_months(meta: Optional[pd.DataFrame] = None) -> Set[Tuple[str, str]]:
+    frame = meta if meta is not None else load_district_meta()
+    complete: Set[Tuple[str, str]] = set()
+    if frame is None or frame.empty:
+        return complete
+    for _, row in frame.iterrows():
+        district = str(row.get("구", "")).strip()
+        start = str(row.get("완료시작연월") or "").replace("-", "")[:6]
+        end = str(row.get("완료종료연월") or "").replace("-", "")[:6]
+        if not district or len(start) < 6 or len(end) < 6:
+            continue
+        for ym in month_range(start, end):
+            complete.add((district, ym))
+    return complete
+
+
 def trade_date_bounds(df: pd.DataFrame, district: str) -> Tuple[str, str]:
     if df is None or df.empty or "구" not in df.columns or "계약일" not in df.columns:
         return "", ""
@@ -316,6 +390,7 @@ def update_district_meta_from_trades(
     districts: Sequence[str],
     trades: pd.DataFrame,
     stamp: Optional[str] = None,
+    completed_ranges: Optional[Dict[str, Tuple[str, str]]] = None,
 ) -> None:
     from sheets_store import DISTRICT_META_COLS, is_sheets_configured, update_district_meta
 
@@ -328,6 +403,13 @@ def update_district_meta_from_trades(
             payload["최초 거래일"] = first
         if last:
             payload["최종 거래일"] = last
+        start_end = (completed_ranges or {}).get(name)
+        if start_end:
+            start, end = start_end
+            if start:
+                payload["완료시작연월"] = start
+            if end:
+                payload["완료종료연월"] = end
         updates[name] = payload
     if is_sheets_configured():
         update_district_meta(updates, order=list(districts))
@@ -366,37 +448,6 @@ def save_trade_history(
         save_trades(df, districts=list(districts) if districts is not None else None)
         return
     df.to_csv(path, index=False, encoding="utf-8-sig")
-
-
-def load_collection_log():
-    from sheets_store import is_sheets_configured, _read_df
-    if is_sheets_configured():
-        return _read_df("collection_log")
-    if os.path.exists("collection_log.csv"):
-        return pd.read_csv("collection_log.csv", dtype=str)
-    return pd.DataFrame(columns=["구", "연월", "수집시각", "건수"])
-
-
-def save_collection_log(log):
-    from sheets_store import is_sheets_configured, _write_df
-    if is_sheets_configured():
-        _write_df("collection_log", log)
-    else:
-        log.to_csv("collection_log.csv", index=False, encoding="utf-8-sig")
-
-
-def completed_months(log):
-    complete = set()
-    for _, row in log.iterrows():
-        ym = str(row.get("연월", ""))
-        try:
-            next_month = pd.Timestamp(ym[:4] + "-" + ym[4:] + "-01") + pd.offsets.MonthBegin(1)
-            collected = pd.Timestamp(row["수집시각"])
-            if collected >= next_month:
-                complete.add((str(row["구"]), ym))
-        except (ValueError, TypeError, KeyError):
-            continue
-    return complete
 
 
 def replace_collected_months(existing, rows, jobs):
@@ -448,10 +499,9 @@ def collect_trades(
     existing = load_trade_history()
     jobs = [(d, ym) for d in district_list for ym in months]
     total = len(jobs)
-    log = load_collection_log()
-    complete = completed_months(log) if skip_complete_months else set()
+    meta = load_district_meta()
+    complete = completed_months(meta) if skip_complete_months else set()
     fetched = set()
-    records = []
 
     for i, (district, ym) in enumerate(jobs, start=1):
         if (district, ym) in complete:
@@ -464,8 +514,6 @@ def collect_trades(
         items = client.fetch_month(SEOUL_LAWD_CD[district], ym)
         buffer.extend(_item_to_row(item, district) for item in items)
         fetched.add((district, ym))
-        records.append({"구": district, "연월": ym,
-                        "수집시각": format_seoul_stamp(), "건수": len(items)})
         if on_progress:
             on_progress(i, total, f"{month_label} 업데이트 완료 ({len(items)}건)")
         time.sleep(MOLIT_REQUEST_DELAY)
@@ -477,15 +525,25 @@ def collect_trades(
 
     if on_progress:
         on_progress(total, total, "시트 저장 중...")
+    stamp = format_seoul_stamp()
     merged = replace_collected_months(existing, stamp_reg_dt(buffer), fetched)
     changed = sorted({district for district, _ in fetched})
     save_trade_history(merged, districts=changed)
     # Mark completion only after the data write succeeds. Failure here causes a safe refetch.
-    log = pd.concat([log, pd.DataFrame(records)], ignore_index=True)
-    log["연월"] = log["연월"].astype(str)
-    log = log.drop_duplicates(["구", "연월"], keep="last")
-    save_collection_log(log)
-    update_district_meta_from_trades(changed, merged)
+    current = {str(row["구"]): row.to_dict() for _, row in meta.iterrows()} if meta is not None and not meta.empty else {}
+    completed_ranges: Dict[str, Tuple[str, str]] = {}
+    for name in changed:
+        row = current.get(name, {})
+        start = str(row.get("완료시작연월") or "")
+        end = str(row.get("완료종료연월") or "")
+        for district, ym in sorted(fetched):
+            if district != name:
+                continue
+            if is_closed_month(ym, stamp):
+                start, end = extend_completed_range(start, end, ym)
+        if start and end:
+            completed_ranges[name] = (start, end)
+    update_district_meta_from_trades(changed, merged, stamp=stamp, completed_ranges=completed_ranges)
     merged.attrs["collected_count"] = len(buffer)
     if on_progress:
         on_progress(total, total, f"저장 완료 ({len(merged)}건)")

@@ -72,7 +72,7 @@ class StorageTests(unittest.TestCase):
             )
         saved = written[-1]
         seongbuk = saved.loc[saved["구"] == "성북구"].iloc[0]
-        self.assertEqual(list(saved.columns), ["구", "LAST_REG_DT", "최초 거래일", "최종 거래일"])
+        self.assertEqual(list(saved.columns), sheets.DISTRICT_META_COLS)
         self.assertEqual(seongbuk["LAST_REG_DT"], "2026-09-11 09:00:00")
         self.assertEqual(seongbuk["최초 거래일"], "2016-01-05")
         self.assertEqual(seongbuk["최종 거래일"], "2026-09-11")

@@ -1,6 +1,6 @@
 import unittest
 import pandas as pd
-from trade_controls import recent_range, date_bounds, area_values, area_label
+from trade_controls import recent_range, date_bounds, area_values, area_label, as_period_range
 
 
 class PeriodTests(unittest.TestCase):
@@ -8,6 +8,12 @@ class PeriodTests(unittest.TestCase):
         self.assertEqual(recent_range(6, "2026-09-11"), ("2026-04", "2026-09"))
         self.assertEqual(recent_range(120, "2026-09-11"), ("2016-10", "2026-09"))
         self.assertEqual(recent_range(3, "2026-01-01"), ("2025-11", "2026-01"))
+
+    def test_select_slider_single_month_still_returns_range(self):
+        self.assertEqual(as_period_range("2026-09"), ("2026-09", "2026-09"))
+        self.assertEqual(as_period_range(("2026-01", "2026-09")), ("2026-01", "2026-09"))
+        self.assertEqual(as_period_range(["2026-09"]), ("2026-09", "2026-09"))
+        self.assertEqual(as_period_range(("2026-09", "2026-01")), ("2026-01", "2026-09"))
 
     def test_today_cutoff_and_leap_month(self):
         self.assertEqual(date_bounds("2026-04", "2026-09", "2026-09-11")[1], pd.Timestamp("2026-09-11"))

@@ -21,14 +21,31 @@ def date_bounds(start, end, now=None):
     return pd.Timestamp(start + "-01"), min(pd.Timestamp(end + "-01") + pd.offsets.MonthEnd(0), now.normalize())
 
 
+def as_period_range(value):
+    """select_slider는 한 달만 고르면 문자열이 되므로 항상 (시작, 끝)으로 맞춘다."""
+    if isinstance(value, (list, tuple)):
+        if len(value) >= 2:
+            start, end = str(value[0]), str(value[-1])
+            return (end, start) if start > end else (start, end)
+        if len(value) == 1 and value[0] not in (None, ""):
+            text = str(value[0])
+            return text, text
+        return None
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    text = str(value)
+    if not text or text in {"nan", "None", "<NA>"}:
+        return None
+    return text, text
+
+
 def period_presets(key):
     now = today()
     options = pd.period_range("2006-01", now, freq="M").astype(str).tolist()
     slider_key = key + "_range"
-    if slider_key not in st.session_state:
-        st.session_state[slider_key] = recent_range(120, now)
+    current = as_period_range(st.session_state.get(slider_key)) or recent_range(120, now)
+    st.session_state[slider_key] = current
     presets = [("전체", None)] + PRESETS
-    current = tuple(st.session_state[slider_key])
     clicked = None
     for col, (label, months) in zip(st.columns(len(presets)), presets):
         target = recent_range(months, now) if months else (options[0], options[-1])
@@ -44,8 +61,11 @@ def period_presets(key):
 def period_slider(key, label="기간 (년월)"):
     now = today()
     options = pd.period_range("2006-01", now, freq="M").astype(str).tolist()
-    start, end = st.select_slider(label, options=options, key=key + "_range")
-    return start, end
+    slider_key = key + "_range"
+    current = as_period_range(st.session_state.get(slider_key)) or recent_range(120, now)
+    st.session_state[slider_key] = current
+    selected = st.select_slider(label, options=options, key=slider_key)
+    return as_period_range(selected) or current
 
 
 def period_control(key):

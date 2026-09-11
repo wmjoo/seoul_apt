@@ -23,6 +23,7 @@ from auth import (
 from crawler import SeoulApartmentCrawler
 from config import SEOUL_DISTRICTS
 from molit_trades import (
+    auto_update_districts,
     collect_trades,
     current_ym,
     districts_needing_today_refresh,
@@ -33,7 +34,7 @@ from molit_trades import (
     save_tracked_districts,
     ym_to_date_span,
 )
-from sheets_store import is_sheets_configured, spreadsheet_url
+from sheets_store import auto_update_enabled, is_sheets_configured, spreadsheet_url, update_district_meta
 from utils import extract_dong
 
 # 새로 수집한 데이터를 세션에 넣어두는 키 (Cloud에서 파일 저장이 안 돼도 새로고침 반영)
@@ -159,7 +160,7 @@ def preprocess_apartment_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def ensure_daily_trade_sync() -> None:
-    """로그인 후 한 번, 오늘 REG_DT가 없는 구만 당월을 자동 갱신한다."""
+    """로그인 후 한 번, 자동업데이트가 켜진 구 중 오늘 미수집 구만 당월을 받는다."""
     if st.session_state.get(SESSION_KEY_DAILY_SYNC):
         return
     st.session_state[SESSION_KEY_DAILY_SYNC] = True
@@ -167,8 +168,7 @@ def ensure_daily_trade_sync() -> None:
         return
     try:
         meta = load_district_meta()
-        tracked = [str(x).strip() for x in meta["구"].tolist() if str(x).strip()]
-        stale = districts_needing_today_refresh(tracked, meta=meta)
+        stale = districts_needing_today_refresh(auto_update_districts(meta), meta=meta)
     except Exception as exc:
         st.toast(f"자동 업데이트 확인 실패: {exc}")
         return
@@ -176,11 +176,12 @@ def ensure_daily_trade_sync() -> None:
         return
     ym = current_ym()
     month_label = f"{ym[:4]}.{ym[4:]}"
-    st.toast(f"{', '.join(stale)} {month_label} 자동 업데이트 시작")
+    st.markdown("##### 실거래 자동 업데이트")
+    bar = st.progress(0, text=f"{', '.join(stale)} {month_label} 확인 중")
 
     def on_progress(done, total, msg):
-        if "업데이트 중" in msg or "업데이트 완료" in msg or "저장" in msg:
-            st.toast(msg)
+        frac = (done / total) if total else 0.0
+        bar.progress(min(1.0, frac), text=f"{msg} ({done}/{total})")
 
     try:
         merged = collect_trades(
@@ -191,9 +192,38 @@ def ensure_daily_trade_sync() -> None:
             skip_complete_months=False,
         )
         st.session_state[SESSION_KEY_TRADES_CACHE] = merged
-        st.toast(f"{', '.join(stale)} {month_label} 자동 업데이트 완료")
+        bar.progress(1.0, text=f"{', '.join(stale)} {month_label} 완료")
+        st.rerun()
     except Exception as exc:
-        st.toast(f"자동 업데이트 실패: {exc}")
+        bar.progress(1.0, text="자동 업데이트 실패")
+        st.error(f"자동 업데이트 실패: {exc}")
+
+
+def render_settings_tab() -> None:
+    st.subheader("설정")
+    st.markdown("#### 자동 업데이트")
+    st.caption("켠 구만 로그인 후, 오늘 아직 받지 않은 당월 거래를 자동으로 받습니다.")
+    try:
+        meta = load_district_meta()
+    except Exception as exc:
+        st.error(f"구 목록을 불러오지 못했습니다: {exc}")
+        return
+    if meta.empty:
+        st.info("크롤링 탭에서 추적 구를 추가하면 여기에 나타납니다.")
+        return
+    cols = st.columns(3)
+    for i, (_, row) in enumerate(meta.iterrows()):
+        name = str(row.get("구", "")).strip()
+        if not name:
+            continue
+        current = auto_update_enabled(row.get("자동업데이트"))
+        last = str(row.get("LAST_REG_DT") or "").strip()
+        with cols[i % 3]:
+            on = st.toggle(name, value=current, key=f"auto_update_{name}")
+            st.caption(f"마지막 수집 {last}" if last else "아직 수집 기록 없음")
+            if on != current:
+                update_district_meta({name: {"자동업데이트": "ON" if on else "OFF"}})
+                st.rerun()
 
 
 def get_cached_trades(force: bool = False) -> pd.DataFrame:
@@ -764,7 +794,7 @@ def render_trade_tracker(apartment_df: pd.DataFrame = None) -> None:
     """로그인 사용자 전용 실거래 수집."""
     st.subheader("실거래가 크롤링")
     if is_sheets_configured():
-        st.caption("거래는 구 이름 시트에 저장하고, 수집 시점·최초/최종 거래일은 `districts` 시트에서 관리합니다.")
+        st.caption("거래는 구 이름 시트에 저장하고, 수집 시점·완료 연월·자동업데이트는 `districts` 시트에서 관리합니다.")
         sheet_url = spreadsheet_url()
         if sheet_url:
             st.link_button("Google 시트 열기", sheet_url)
@@ -1136,10 +1166,10 @@ if selected_subway != "전체":
 # 결과 표시
 
 
-MAIN_TABS = ["실거래가 조회", "단지 비교", "실거래가 크롤링", "목록", "지도", "통계"]
+MAIN_TABS = ["실거래가 조회", "단지 비교", "실거래가 크롤링", "목록", "지도", "통계", "설정"]
 
 if len(filtered_df) > 0:
-    tab4, tab6, tab5, tab1, tab2, tab3 = st.tabs(MAIN_TABS)
+    tab4, tab6, tab5, tab1, tab2, tab3, tab7 = st.tabs(MAIN_TABS)
 
     with tab1:
         render_list_metrics(filtered_df)
@@ -1486,9 +1516,11 @@ if len(filtered_df) > 0:
         render_trade_compare(get_cached_trades, _prepare_browse_trades, _build_trade_chart, _build_volume_chart, df)
     with tab5:
         render_tracker_tab(df)
+    with tab7:
+        render_settings_tab()
 else:
     st.warning("조건에 맞는 아파트가 없습니다. 필터를 조정해주세요.")
-    tab4, tab6, tab5, tab1, tab2, tab3 = st.tabs(MAIN_TABS)
+    tab4, tab6, tab5, tab1, tab2, tab3, tab7 = st.tabs(MAIN_TABS)
     with tab1:
         st.info("검색 결과가 없습니다. 필터를 조정해주세요.")
     with tab2:
@@ -1501,6 +1533,8 @@ else:
         render_trade_compare(get_cached_trades, _prepare_browse_trades, _build_trade_chart, _build_volume_chart, df)
     with tab5:
         render_tracker_tab(df)
+    with tab7:
+        render_settings_tab()
 
 # 사이드바 하단
 st.sidebar.markdown("---")
