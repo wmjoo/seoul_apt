@@ -38,6 +38,47 @@ class StorageTests(unittest.TestCase):
         calls = [call[0] for call in ws.mock_calls]
         self.assertLess(calls.index("update"), calls.index("batch_clear"))
 
+    def test_save_trades_splits_district_sheets_and_keeps_reg_dt_last(self):
+        writes = []
+
+        def capture(title, df):
+            writes.append((title, list(df.columns), df["구"].tolist()))
+
+        frame = pd.DataFrame({
+            "구": ["성북구", "강남구"],
+            "지번": ["1", "2"],
+            "REG_DT": ["2026-09-11 09:00:00", "2026-09-11 09:01:00"],
+        })
+        with patch.object(sheets, "_write_df", side_effect=capture):
+            sheets.save_trades(frame)
+        self.assertEqual(set(title for title, _, _ in writes), {"성북구", "강남구"})
+        for _, cols, _ in writes:
+            self.assertEqual(cols[-1], "REG_DT")
+
+    def test_districts_sheet_keeps_collection_metadata(self):
+        existing = pd.DataFrame({
+            "구": ["성북구"],
+            "LAST_REG_DT": ["2026-09-10 08:00:00"],
+            "최초 거래일": ["2016-01-05"],
+            "최종 거래일": ["2026-09-09"],
+        })
+        written = []
+        with patch.object(sheets, "load_district_meta", return_value=existing), \
+             patch.object(sheets, "save_district_meta", side_effect=written.append):
+            sheets.save_districts(["성북구", "강남구"])
+            sheets.update_district_meta(
+                {"성북구": {"LAST_REG_DT": "2026-09-11 09:00:00", "최종 거래일": "2026-09-11"}},
+                order=["성북구", "강남구"],
+            )
+        saved = written[-1]
+        seongbuk = saved.loc[saved["구"] == "성북구"].iloc[0]
+        self.assertEqual(list(saved.columns), ["구", "LAST_REG_DT", "최초 거래일", "최종 거래일"])
+        self.assertEqual(seongbuk["LAST_REG_DT"], "2026-09-11 09:00:00")
+        self.assertEqual(seongbuk["최초 거래일"], "2016-01-05")
+        self.assertEqual(seongbuk["최종 거래일"], "2026-09-11")
+        self.assertIn("강남구", set(saved["구"]))
+        self.assertEqual(sheets.last_reg_date("성북구", existing), pd.Timestamp("2026-09-10").date())
+
     def test_permission_error_does_not_create_worksheet(self):
         book = Mock()
         book.worksheet.side_effect = PermissionError()

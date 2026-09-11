@@ -21,7 +21,7 @@ def date_bounds(start, end, now=None):
     return pd.Timestamp(start + "-01"), min(pd.Timestamp(end + "-01") + pd.offsets.MonthEnd(0), now.normalize())
 
 
-def period_control(key):
+def period_presets(key):
     now = today()
     options = pd.period_range("2006-01", now, freq="M").astype(str).tolist()
     slider_key = key + "_range"
@@ -39,8 +39,19 @@ def period_control(key):
     if clicked:
         st.session_state[slider_key] = clicked
         st.rerun()
-    start, end = st.select_slider("기간 (년월)", options=options, key=slider_key)
-    left, right = date_bounds(start, end, now)
+
+
+def period_slider(key, label="기간 (년월)"):
+    now = today()
+    options = pd.period_range("2006-01", now, freq="M").astype(str).tolist()
+    start, end = st.select_slider(label, options=options, key=key + "_range")
+    return start, end
+
+
+def period_control(key):
+    period_presets(key)
+    start, end = period_slider(key)
+    left, right = date_bounds(start, end)
     st.caption(f"{left:%Y-%m-%d} ~ {right:%Y-%m-%d} · 최근 기간은 시작 월 1일부터 오늘까지입니다.")
     return start, end
 

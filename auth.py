@@ -87,10 +87,10 @@ def logout_tracker() -> None:
     st.session_state.pop(SESSION_KEY_TRACKER_USER, None)
 
 
-def render_tracker_login_panel(title="실거래가 크롤링", prefix="tracker") -> None:
-    """실거래 트래커 탭 안에 로그인 폼을 그립니다."""
+def render_tracker_login_panel(title="로그인", prefix="app") -> None:
+    """앱 진입 전 로그인 폼을 그립니다."""
     st.subheader(title)
-    st.caption("이 탭은 허용된 계정만 사용할 수 있습니다.")
+    st.caption("허용된 계정으로 로그인한 뒤 메뉴를 사용할 수 있습니다.")
     users = get_tracker_users()
 
     if not users:
@@ -105,3 +105,9 @@ def render_tracker_login_panel(title="실거래가 크롤링", prefix="tracker")
                 st.rerun()
             else:
                 st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
+
+
+def render_app_login() -> None:
+    _, mid, _ = st.columns([1, 1.15, 1])
+    with mid:
+        render_tracker_login_panel("서울 아파트 검색", "app")

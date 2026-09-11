@@ -1,4 +1,4 @@
-from trade_controls import period_control, date_bounds, area_values, grouped_chart_frame, area_label
+from trade_controls import period_control, period_presets, period_slider, date_bounds, area_values, grouped_chart_frame, area_label
 from trade_compare import render_trade_compare
 from market_cycles import DOWN_YEARS, half_phase, market_phase, shade_downturns, annual_activity, phase_comparison, HISTORY_SOURCE
 from trade_metadata import complex_metadata
@@ -18,13 +18,16 @@ from auth import (
     get_tracker_user,
     is_tracker_logged_in,
     logout_tracker,
-    render_tracker_login_panel,
+    render_app_login,
 )
 from crawler import SeoulApartmentCrawler
 from config import SEOUL_DISTRICTS
 from molit_trades import (
     collect_trades,
+    current_ym,
+    districts_needing_today_refresh,
     has_molit_api_key,
+    load_district_meta,
     load_trade_history,
     load_tracked_districts,
     save_tracked_districts,
@@ -38,6 +41,7 @@ SESSION_KEY_APARTMENT_DATA = "apartment_data"
 SESSION_KEY_COLLECT_BANNER = "tracker_collect_banner"
 SESSION_KEY_TRADES_CACHE = "cached_trades_df"
 SESSION_KEY_BROWSE_QUERY = "browse_trade_query"
+SESSION_KEY_DAILY_SYNC = "daily_trade_sync_done"
 # 메인 아파트(실거래가) 단지명 유사도 매칭 임계값 (0~1). 0.75로 완화해 매칭률 상승
 MAIN_APT_SIMILARITY_THRESHOLD = 0.75
 
@@ -152,6 +156,44 @@ def preprocess_apartment_df(df: pd.DataFrame) -> pd.DataFrame:
     if "동" in df.columns:
         df["동"] = df["동"].replace("답십리1동", "답십리동")
     return df
+
+
+def ensure_daily_trade_sync() -> None:
+    """로그인 후 한 번, 오늘 REG_DT가 없는 구만 당월을 자동 갱신한다."""
+    if st.session_state.get(SESSION_KEY_DAILY_SYNC):
+        return
+    st.session_state[SESSION_KEY_DAILY_SYNC] = True
+    if not is_sheets_configured() or not has_molit_api_key():
+        return
+    try:
+        meta = load_district_meta()
+        tracked = [str(x).strip() for x in meta["구"].tolist() if str(x).strip()]
+        stale = districts_needing_today_refresh(tracked, meta=meta)
+    except Exception as exc:
+        st.toast(f"자동 업데이트 확인 실패: {exc}")
+        return
+    if not stale:
+        return
+    ym = current_ym()
+    month_label = f"{ym[:4]}.{ym[4:]}"
+    st.toast(f"{', '.join(stale)} {month_label} 자동 업데이트 시작")
+
+    def on_progress(done, total, msg):
+        if "업데이트 중" in msg or "업데이트 완료" in msg or "저장" in msg:
+            st.toast(msg)
+
+    try:
+        merged = collect_trades(
+            stale,
+            start_ym=ym,
+            end_ym=ym,
+            on_progress=on_progress,
+            skip_complete_months=False,
+        )
+        st.session_state[SESSION_KEY_TRADES_CACHE] = merged
+        st.toast(f"{', '.join(stale)} {month_label} 자동 업데이트 완료")
+    except Exception as exc:
+        st.toast(f"자동 업데이트 실패: {exc}")
 
 
 def get_cached_trades(force: bool = False) -> pd.DataFrame:
@@ -525,14 +567,8 @@ def _build_volume_chart(df: pd.DataFrame, ym_start: str, ym_end: str, palette_ar
 
 def render_trade_browse(apartment_df=None) -> None:
     """로그인 후 실거래 내역을 조회한다."""
-    if not is_tracker_logged_in():
-        render_tracker_login_panel("실거래가 조회", "browse")
-        return
-    _, refresh_col, logout_col = st.columns([7, 2, 1])
+    _, refresh_col = st.columns([8, 2])
     refresh = refresh_col.button("최신 데이터 불러오기", key="browse_refresh", use_container_width=True)
-    if logout_col.button("로그아웃", key="browse_logout", use_container_width=True):
-        logout_tracker()
-        st.rerun()
     try:
         trades_df = get_cached_trades(force=refresh)
     except Exception:
@@ -612,11 +648,19 @@ def render_trade_browse(apartment_df=None) -> None:
             st.dataframe(metadata, hide_index=True, use_container_width=True)
 
     query_key = f"{query.get('구')}_{query.get('동')}_{query.get('단지')}"
-    ym_start, ym_end = period_control(f"browse_period_{query_key}")
-    left, right = date_bounds(ym_start, ym_end)
-    period_df = result_df[result_df["계약일"].between(left, right + pd.Timedelta(days=1), inclusive="left")]
-    grouped = st.radio("전용면적 표시", ["소수점 구분", "동일 전용면적 묶기"],
-                       horizontal=True, key=f"browse_group_{query_key}") == "동일 전용면적 묶기"
+    period_key = f"browse_period_{query_key}"
+    period_presets(period_key)
+    pcol, gcol, acol, fcol = st.columns([3.4, 2.0, 1.4, 0.8])
+    with pcol:
+        ym_start, ym_end = period_slider(period_key)
+    with gcol:
+        grouped = st.radio(
+            "전용면적 표시",
+            ["소수점 구분", "동일 전용면적 묶기"],
+            index=1,
+            horizontal=True,
+            key=f"browse_group_bundled_{query_key}",
+        ) == "동일 전용면적 묶기"
     areas = sorted(area_values(result_df, grouped).dropna().unique())
     area_labels = ["전체"] + [area_label(a, grouped) for a in areas]
     area_default = "전체"
@@ -624,17 +668,18 @@ def render_trade_browse(apartment_df=None) -> None:
         mode_area = area_values(result_df, grouped).mode()
         if len(mode_area) > 0:
             area_default = area_label(mode_area.iloc[0], grouped)
-    fcol, ccol = st.columns([2, 3])
-    with fcol:
+    with acol:
         selected_area = st.selectbox(
             "전용면적",
             area_labels,
             index=area_labels.index(area_default) if area_default in area_labels else 0,
             key=f"browse_area_{query_key}_{grouped}",
         )
-    with ccol:
+    with fcol:
         st.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
         exclude_first = st.checkbox("1층 제외", value=False, key=f"browse_exclude_1f_{query_key}")
+    left, right = date_bounds(ym_start, ym_end)
+    period_df = result_df[result_df["계약일"].between(left, right + pd.Timedelta(days=1), inclusive="left")]
 
     view_df = period_df
     if selected_area != "전체":
@@ -711,18 +756,7 @@ def render_trade_browse(apartment_df=None) -> None:
 
 
 def render_tracker_tab(apartment_df: pd.DataFrame = None) -> None:
-    """실거래가 크롤링 탭: 비로그인은 로그인 폼, 로그인은 수집 화면."""
-    if not is_tracker_logged_in():
-        render_tracker_login_panel()
-        return
-
-    top, logout_col = st.columns([4, 1])
-    with top:
-        st.caption(f"{get_tracker_user()} 님으로 로그인됨")
-    with logout_col:
-        if st.button("로그아웃", width="stretch", key="tracker_logout"):
-            logout_tracker()
-            st.rerun()
+    """실거래가 크롤링 탭."""
     render_trade_tracker(apartment_df)
 
 
@@ -730,7 +764,7 @@ def render_trade_tracker(apartment_df: pd.DataFrame = None) -> None:
     """로그인 사용자 전용 실거래 수집."""
     st.subheader("실거래가 크롤링")
     if is_sheets_configured():
-        st.caption("선택한 구의 매매 실거래는 비공개 Google 시트의 `trades` 탭에 저장됩니다.")
+        st.caption("거래는 구 이름 시트에 저장하고, 수집 시점·최초/최종 거래일은 `districts` 시트에서 관리합니다.")
         sheet_url = spreadsheet_url()
         if sheet_url:
             st.link_button("Google 시트 열기", sheet_url)
@@ -747,11 +781,14 @@ def render_trade_tracker(apartment_df: pd.DataFrame = None) -> None:
         st.warning("`.streamlit/secrets.toml`의 `PUBLIC_DATA_API_KEY`를 확인하세요.")
 
     try:
+        district_meta = load_district_meta()
         tracked = load_tracked_districts()
     except Exception:
         st.error("추적 구를 불러오지 못했습니다. 저장소 연결을 확인해주세요.")
         return
     st.markdown("#### 추적 구")
+    if not district_meta.empty:
+        st.dataframe(district_meta, hide_index=True, use_container_width=True)
     if not tracked:
         st.info("아래에서 구를 추가한 뒤 수집을 실행하세요. 선택한 구의 거래가 전부 저장됩니다.")
     else:
@@ -850,6 +887,12 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+if not is_tracker_logged_in():
+    render_app_login()
+    st.stop()
+
+ensure_daily_trade_sync()
+
 # 제목
 # st.title("🏢 서울 아파트 검색 시스템")
 # st.markdown("---")
@@ -916,6 +959,11 @@ h2 {font-size:1.3rem !important;} h3 {font-size:1.1rem !important;}
 button {border-radius:6px !important;}
 </style>
 """, unsafe_allow_html=True)
+
+st.sidebar.caption(f"{get_tracker_user()} 님")
+if st.sidebar.button("로그아웃", width="stretch", key="app_logout"):
+    logout_tracker()
+    st.rerun()
 
 list_filters = st.sidebar.expander("목록·지도 검색 필터", expanded=False)
 # 사이드바 필터

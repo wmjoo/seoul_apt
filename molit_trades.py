@@ -10,8 +10,9 @@ import os
 import re
 import time
 import urllib.parse
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import date, datetime
+
+from seoul_time import as_seoul_date, format_seoul_stamp, seoul_now, seoul_today
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 from xml.etree import ElementTree as ET
 
@@ -99,12 +100,12 @@ def month_range(start_ym: str, end_ym: str) -> List[str]:
 
 
 def current_ym() -> str:
-    now = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
+    now = seoul_now()
     return f"{now.year:04d}{now.month:02d}"
 
 
 def months_back(n: int) -> str:
-    now = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
+    now = seoul_now()
     y, m = now.year, now.month - (max(n, 1) - 1)
     while m <= 0:
         m += 12
@@ -117,7 +118,7 @@ def ym_to_date_span(start_ym: str, end_ym: str) -> tuple:
     start = f"{int(start_ym[:4]):04d}-{int(start_ym[4:]):02d}-01"
     ey, em = int(end_ym[:4]), int(end_ym[4:])
     last = calendar.monthrange(ey, em)[1]
-    now = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
+    now = seoul_now()
     if ey == now.year and em == now.month:
         last = min(last, now.day)
     end = f"{ey:04d}-{em:02d}-{last:02d}"
@@ -230,23 +231,24 @@ class MolitTradeClient:
         return items
 
 
-def load_tracked_districts(path: str = TRACKED_DISTRICTS_CSV) -> List[str]:
-    from sheets_store import is_sheets_configured, load_districts
+def load_district_meta(path: str = TRACKED_DISTRICTS_CSV) -> pd.DataFrame:
+    from sheets_store import is_sheets_configured, load_district_meta as load_sheet_meta, normalize_district_meta
 
     if is_sheets_configured():
-        districts = load_districts()
-    else:
-        districts = []
-        if os.path.exists(path):
-            df = pd.read_csv(path, encoding="utf-8-sig")
-            if "구" in df.columns:
-                districts = [str(x).strip() for x in df["구"].dropna().tolist() if str(x).strip()]
-        elif os.path.exists(TRACKED_COMPLEXES_CSV):
-            old = pd.read_csv(TRACKED_COMPLEXES_CSV, encoding="utf-8-sig")
-            if "구" in old.columns:
-                districts = [str(x).strip() for x in old["구"].dropna().unique().tolist() if str(x).strip()]
+        return load_sheet_meta()
+    if os.path.exists(path):
+        return normalize_district_meta(pd.read_csv(path, encoding="utf-8-sig"))
+    if os.path.exists(TRACKED_COMPLEXES_CSV):
+        old = pd.read_csv(TRACKED_COMPLEXES_CSV, encoding="utf-8-sig")
+        if "구" in old.columns:
+            return normalize_district_meta(pd.DataFrame({"구": old["구"]}))
+    return normalize_district_meta(pd.DataFrame())
+
+
+def load_tracked_districts(path: str = TRACKED_DISTRICTS_CSV) -> List[str]:
     unique = []
-    for name in districts:
+    for name in load_district_meta(path)["구"].tolist():
+        name = str(name).strip()
         if name in SEOUL_LAWD_CD and name not in unique:
             unique.append(name)
     return unique
@@ -258,12 +260,89 @@ def save_tracked_districts(districts: Sequence[str], path: str = TRACKED_DISTRIC
         name = str(name).strip()
         if name in SEOUL_LAWD_CD and name not in unique:
             unique.append(name)
-    from sheets_store import is_sheets_configured, save_districts
+    from sheets_store import is_sheets_configured, save_districts, DISTRICT_META_COLS
 
     if is_sheets_configured():
         save_districts(unique)
         return
-    pd.DataFrame({"구": unique}).to_csv(path, index=False, encoding="utf-8-sig")
+    current = {str(row["구"]): row.to_dict() for _, row in load_district_meta(path).iterrows()}
+    rows = []
+    for name in unique:
+        row = current.get(name, {col: "" for col in DISTRICT_META_COLS})
+        row["구"] = name
+        rows.append({col: row.get(col, "") for col in DISTRICT_META_COLS})
+    pd.DataFrame(rows, columns=DISTRICT_META_COLS).to_csv(path, index=False, encoding="utf-8-sig")
+
+
+def stamp_reg_dt(rows: Sequence[Dict], when: Optional[datetime] = None) -> List[Dict]:
+    stamp = format_seoul_stamp(when)
+    stamped = []
+    for row in rows:
+        item = dict(row)
+        item["REG_DT"] = stamp
+        stamped.append(item)
+    return stamped
+
+
+def last_reg_date(district: str, meta: Optional[pd.DataFrame] = None):
+    frame = load_district_meta() if meta is None else meta
+    if frame is None or frame.empty or "구" not in frame.columns or "LAST_REG_DT" not in frame.columns:
+        return None
+    dates = [as_seoul_date(value) for value in frame.loc[frame["구"].astype(str).str.strip() == district, "LAST_REG_DT"]]
+    dates = [value for value in dates if value is not None]
+    return max(dates) if dates else None
+
+
+def districts_needing_today_refresh(
+    districts: Sequence[str],
+    today: Optional[date] = None,
+    meta: Optional[pd.DataFrame] = None,
+) -> List[str]:
+    today = today or seoul_today()
+    frame = load_district_meta() if meta is None else meta
+    return [name for name in districts if last_reg_date(name, frame) != today]
+
+
+def trade_date_bounds(df: pd.DataFrame, district: str) -> Tuple[str, str]:
+    if df is None or df.empty or "구" not in df.columns or "계약일" not in df.columns:
+        return "", ""
+    dates = pd.to_datetime(df.loc[df["구"].astype(str).str.strip() == district, "계약일"], errors="coerce").dropna()
+    if dates.empty:
+        return "", ""
+    return dates.min().strftime("%Y-%m-%d"), dates.max().strftime("%Y-%m-%d")
+
+
+def update_district_meta_from_trades(
+    districts: Sequence[str],
+    trades: pd.DataFrame,
+    stamp: Optional[str] = None,
+) -> None:
+    from sheets_store import DISTRICT_META_COLS, is_sheets_configured, update_district_meta
+
+    stamp = stamp or format_seoul_stamp()
+    updates = {}
+    for name in districts:
+        first, last = trade_date_bounds(trades, name)
+        payload = {"LAST_REG_DT": stamp}
+        if first:
+            payload["최초 거래일"] = first
+        if last:
+            payload["최종 거래일"] = last
+        updates[name] = payload
+    if is_sheets_configured():
+        update_district_meta(updates, order=list(districts))
+        return
+    current = {str(row["구"]): row.to_dict() for _, row in load_district_meta().iterrows()}
+    names = list(dict.fromkeys(list(districts) + list(current)))
+    rows = []
+    for name in names:
+        row = current.get(name, {col: "" for col in DISTRICT_META_COLS})
+        row["구"] = name
+        for key, value in updates.get(name, {}).items():
+            if value not in (None, ""):
+                row[key] = value
+        rows.append({col: row.get(col, "") for col in DISTRICT_META_COLS})
+    pd.DataFrame(rows, columns=DISTRICT_META_COLS).to_csv(TRACKED_DISTRICTS_CSV, index=False, encoding="utf-8-sig")
 
 
 def load_trade_history(path: str = TRADE_HISTORY_CSV) -> pd.DataFrame:
@@ -276,11 +355,15 @@ def load_trade_history(path: str = TRADE_HISTORY_CSV) -> pd.DataFrame:
     return pd.read_csv(path, encoding="utf-8-sig")
 
 
-def save_trade_history(df: pd.DataFrame, path: str = TRADE_HISTORY_CSV) -> None:
+def save_trade_history(
+    df: pd.DataFrame,
+    path: str = TRADE_HISTORY_CSV,
+    districts: Optional[Sequence[str]] = None,
+) -> None:
     from sheets_store import is_sheets_configured, save_trades
 
     if is_sheets_configured():
-        save_trades(df)
+        save_trades(df, districts=list(districts) if districts is not None else None)
         return
     df.to_csv(path, index=False, encoding="utf-8-sig")
 
@@ -375,13 +458,16 @@ def collect_trades(
             if on_progress:
                 on_progress(i, total, f"{district} {ym[:4]}.{ym[4:]} 생략")
             continue
+        month_label = f"{district} {ym[:4]}.{ym[4:]}"
         if on_progress:
-            on_progress(i - 1, total, f"{district} {ym[:4]}.{ym[4:]} 조회 중")
+            on_progress(i - 1, total, f"{month_label} 업데이트 중")
         items = client.fetch_month(SEOUL_LAWD_CD[district], ym)
         buffer.extend(_item_to_row(item, district) for item in items)
         fetched.add((district, ym))
         records.append({"구": district, "연월": ym,
-                        "수집시각": datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None).isoformat(), "건수": len(items)})
+                        "수집시각": format_seoul_stamp(), "건수": len(items)})
+        if on_progress:
+            on_progress(i, total, f"{month_label} 업데이트 완료 ({len(items)}건)")
         time.sleep(MOLIT_REQUEST_DELAY)
 
     if not fetched:
@@ -391,13 +477,15 @@ def collect_trades(
 
     if on_progress:
         on_progress(total, total, "시트 저장 중...")
-    merged = replace_collected_months(existing, buffer, fetched)
-    save_trade_history(merged)
+    merged = replace_collected_months(existing, stamp_reg_dt(buffer), fetched)
+    changed = sorted({district for district, _ in fetched})
+    save_trade_history(merged, districts=changed)
     # Mark completion only after the data write succeeds. Failure here causes a safe refetch.
     log = pd.concat([log, pd.DataFrame(records)], ignore_index=True)
     log["연월"] = log["연월"].astype(str)
     log = log.drop_duplicates(["구", "연월"], keep="last")
     save_collection_log(log)
+    update_district_meta_from_trades(changed, merged)
     merged.attrs["collected_count"] = len(buffer)
     if on_progress:
         on_progress(total, total, f"저장 완료 ({len(merged)}건)")

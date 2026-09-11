@@ -4,7 +4,6 @@ import streamlit as st
 from trade_controls import period_control, date_bounds, area_values, grouped_chart_frame
 from trade_metadata import name_key
 from market_cycles import shade_downturns
-from auth import is_tracker_logged_in, render_tracker_login_panel, logout_tracker
 
 
 def common_areas(frames):
@@ -67,14 +66,8 @@ def parse_area_choice(value):
 
 
 def render_trade_compare(load_data, prepare, price_chart, volume_chart, apartments=None):
-    if not is_tracker_logged_in():
-        render_tracker_login_panel("단지 비교", "compare")
-        return
-    _, refresh_col, logout_col = st.columns([7, 2, 1])
+    _, refresh_col = st.columns([8, 2])
     refresh = refresh_col.button("최신 데이터 불러오기", key="compare_refresh", use_container_width=True)
-    if logout_col.button("로그아웃", key="compare_logout", use_container_width=True):
-        logout_tracker()
-        st.rerun()
     try:
         frame = prepare(load_data(force=refresh))
     except Exception:
