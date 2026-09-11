@@ -1,202 +1,142 @@
-# 서울 아파트 검색 시스템
+# 서울 아파트 검색
 
-서울시 아파트 데이터를 크롤링하고, Streamlit을 통해 다양한 조건으로 필터링하여 아파트를 검색할 수 있는 웹 애플리케이션입니다.
+Streamlit 앱입니다. `[tracker_users]` 계정으로 로그인한 뒤에만 화면이 열립니다. 아파트 목록·지도·통계는 저장소의 메타데이터 CSV를 쓰고, 실거래는 국토부 API로 받아 비공개 Google 시트에 구별로 저장합니다.
 
-## 주요 기능
+배포 예: https://seoul-apt.streamlit.app
 
-- 🏢 서울시 아파트 데이터 크롤링 및 정형화
-- 🔍 다양한 조건별 필터링 (자치구, 건축연도, 세대수, 평형, 지하철역 거리 등)
-- 📊 통계 분석 및 시각화
-- 🗺️ 지도에서 아파트 위치 확인
-- 📥 검색 결과 CSV 다운로드
+## 화면
 
-## 데이터 필드
+로그인 후 탭과 사이드바가 보입니다. 로그아웃은 사이드바입니다.
 
-- **자치구**: 서울시 25개 자치구
-- **주소**: 상세 주소
-- **건축연도**: 아파트 건축 연도
-- **세대수**: 아파트 세대 수
-- **복도/계단식**: 복도식, 계단식, 혼합식
-- **평형**: 전용면적 기준 평형
-- **위도/경도**: 아파트 위치 좌표
-- **가장 가까운 지하철역**: 가장 가까운 지하철역명
-- **지하철역 거리**: 지하철역과의 직선 거리 (km)
+| 탭 | 하는 일 |
+|---|---|
+| 실거래가 조회 | 구·동·단지 검색. 기간 슬라이더, 전용면적(동일 면적 묶기 기본), 1층 제외. 단지 선택 시 시세·거래량 차트와 KB 반기 하락기 음영 |
+| 단지 비교 | 여러 단지를 같은 기간·면적으로 겹쳐 비교 |
+| 실거래가 크롤링 | 추적 구 추가/삭제, 기간 수집. 6개월 이하는 다시 받고, 더 긴 기간은 완료된 구·월을 건너뜀 |
+| 목록 / 지도 / 통계 | 사이드바 필터로 아파트 메타데이터를 보고 내려받음 |
+| 설정 | `districts`에 있는 구마다 자동업데이트 온오프 |
 
-## 설치 방법
+로그인 직후, 설정에서 **켠 구**이면서 `LAST_REG_DT`가 오늘(서울)이 아니면 당월만 자동 수집합니다. 진행은 페이지 너비 프로그레스 바로 표시합니다.
 
-1. 저장소 클론 또는 다운로드
+날짜·수집 시각은 Cloud가 UTC여도 `Asia/Seoul`로 맞춥니다.
 
-```bash
-cd seoul_apt
-```
+## 저장소
 
-2. 필요한 패키지 설치
+### 아파트 목록
+
+앱은 아래 순서로 목록을 읽습니다.
+
+1. 세션에 방금 만든 데이터
+2. `seoul_apartments_metadata.csv` (저장소에 포함)
+3. `seoul_apartments.csv`
+4. 없으면 샘플 생성
+
+사이드바「새 데이터 생성」은 `data_password`가 맞을 때만 보입니다. 목록/지도에는 `seoul_disrict_main_apt.csv`와 단지명을 맞춰 평수·실거래가 참고 컬럼을 붙입니다.
+
+### 실거래 (Google 시트)
+
+`[sheets]` + `[gcp_service_account]`가 있으면 시트를 씁니다. 없으면 로컬 `apt_trades.csv` / `tracked_districts.csv`로 떨어집니다. 이력 CSV는 Git에 올리지 마세요.
+
+시트는 **링크가 있는 모든 사용자**가 아니라, 본인 구글 계정과 서비스 계정 이메일에만 공유하세요.
+
+| 시트 | 내용 |
+|---|---|
+| `성북구` 등 구 이름 | 그 구 거래. 행 끝 `REG_DT` |
+| `districts` | 구 메타. 코드가 읽고 쓰는 유일한 수집 메타 시트 |
+| `trades` | 예전 통합 시트. 있으면 읽기만 함 |
+| `collection_log` | 더 이상 쓰지 않음. `districts` 완료 연월이 비어 있을 때만 한 번 이관 |
+
+`districts` 컬럼:
+
+- `구`
+- `자동업데이트` — `ON` / `OFF` (기본 `OFF`)
+- `LAST_REG_DT` — 마지막 수집 시각
+- `최초 거래일` / `최종 거래일`
+- `완료시작연월` / `완료종료연월` — 달이 닫힌 뒤 수집된 연속 구간. 긴 기간 수집 시 이 구간은 건너뜀
+
+거래 저장에 실패하면 완료 구간과 `LAST_REG_DT`를 남기지 않습니다. 같은 구·월을 다시 받을 때 조건이 같은 별개 거래는 지우지 않습니다.
+
+시장 국면(회색 음영, 상승/하락 연평균)은 `data/seoul_market_monthly.json`(KB 서울 아파트 매매가격지수)을 씁니다. 앱 실행 중 지수를 다시 받지 않습니다. 재수집은 `python scripts/fetch_market_index.py`, 설명은 `data/README.md`.
+
+## 로컬 실행
 
 ```bash
 pip install -r requirements.txt
-```
-
-## 사용 방법
-
-### 1. 환경 설정
-
-#### API 키 설정
-
-`.env` 파일을 생성하고 API 키를 설정하세요:
-
-```bash
-PUBLIC_DATA_API_KEY=your_public_data_api_key
-SEOUL_DATA_API_KEY=your_seoul_api_key
-```
-
-또는 Streamlit Cloud의 Secrets에서 설정할 수 있습니다.
-
-#### Streamlit Secrets 설정 (선택사항)
-
-`.streamlit/secrets.toml` 파일을 생성하세요. 예시는 저장소의 `secrets.toml.example`을 참고하면 됩니다.
-
-```toml
-[secrets]
-data_password = "your_password_here"
-
-[tracker_users]
-family1 = "password1"
-family2 = "password2"
-```
-
-- `data_password`: 사이드바「새 데이터 생성」버튼용
-- `[tracker_users]`: 실거래 트래커 탭 로그인 계정 (아이디 = 비밀번호). 가족/지인 몇 명만 추가하면 됩니다.
-- 실거래 이력 파일 `apt_trades.csv`는 로그인한 세션에서만 읽습니다. Git에 올리지 마세요.
-
-### 2. 데이터 생성
-
-#### 실제 데이터 수집 (권장)
-
-서울 열린데이터광장 API를 사용하여 실제 아파트 메타데이터를 수집합니다:
-
-```bash
-python crawl_metadata.py
-```
-
-이 명령어는 `seoul_apartments_metadata.csv` 파일을 생성합니다.
-
-#### 샘플 데이터 생성
-
-API 키가 없거나 테스트 목적이라면 샘플 데이터를 생성할 수 있습니다:
-
-```bash
-python crawler.py
-```
-
-이 명령어는 `seoul_apartments.csv` 파일을 생성합니다.
-
-### 2. Streamlit 앱 실행
-
-```bash
+cp secrets.toml.example .streamlit/secrets.toml
 streamlit run app.py
 ```
 
-브라우저에서 자동으로 앱이 열립니다. (일반적으로 http://localhost:8501)
+브라우저에서 http://localhost:8501
 
-### 3. 필터링 사용
+테스트:
 
-사이드바에서 다음 조건들을 설정할 수 있습니다:
+```bash
+python -m pytest tests
+```
 
-- **자치구**: 원하는 자치구 선택
-- **건축연도 범위**: 슬라이더로 연도 범위 설정
-- **세대수 범위**: 슬라이더로 세대수 범위 설정
-- **복도/계단식**: 복도식, 계단식, 혼합식 선택
-- **평형 범위**: 슬라이더로 평형 범위 설정
-- **지하철역 거리**: 지하철역과의 거리 범위 설정
-- **가장 가까운 지하철역**: 특정 지하철역 선택
+## Secrets
 
-**실거래가 조회** 탭은 `[tracker_users]` 계정 로그인 후 시트에 저장된 실거래를 봅니다. **실거래가 크롤링** 탭은 `[tracker_users]` 계정으로 로그인한 뒤에만 수집할 수 있습니다.
+로컬은 `.streamlit/secrets.toml`, Cloud는 앱 Secrets에 같은 TOML을 넣습니다. 예시는 `secrets.toml.example`입니다. 비밀번호와 키는 Git에 커밋하지 마세요.
 
-### 4. 결과 확인
+```toml
+[secrets]
+data_password = "데이터생성_비밀번호"
+PUBLIC_DATA_API_KEY = "공공데이터포털_일반인증키"
 
-- **목록 탭**: 필터링된 아파트 목록을 테이블로 확인
-- **지도 탭**: 지도에서 아파트 위치 확인
-- **통계 탭**: 다양한 통계 차트 확인
+[tracker_users]
+family1 = "비밀번호1"
 
-## 파일 구조
+[sheets]
+spreadsheet_id = "구글시트_ID"
+
+[gcp_service_account]
+type = "service_account"
+# ... 서비스 계정 JSON 필드
+```
+
+- `[tracker_users]` 또는 `[secrets.tracker_users]`: 로그인 아이디 = 비밀번호. 없으면 앱에 들어갈 수 없습니다.
+- `PUBLIC_DATA_API_KEY`: 국토부 아파트 매매 실거래 API. 수집·자동업데이트에 필요합니다.
+- `data_password`: 사이드바 아파트 목록 재수집.
+- `[sheets]` + `[gcp_service_account]`: 실거래 시트. 없으면 조회/수집이 비거나 로컬 CSV만 씁니다.
+- Cloud에서 `private_key`는 삼중 따옴표 PEM 또는 `\n`이 들어간 한 줄로 넣으세요.
+
+`SEOUL_DATA_API_KEY`는 아파트 메타데이터 크롤링(`crawl_metadata.py` / `crawler.py`)에만 씁니다. 실거래 수집에는 필요 없습니다.
+
+자세한 Cloud 배포는 [STREAMLIT_CLOUD_DEPLOY.md](STREAMLIT_CLOUD_DEPLOY.md), Secrets 형식은 [STREAMLIT_SECRETS_FORMAT.md](STREAMLIT_SECRETS_FORMAT.md).
+
+## 아파트 메타데이터 다시 받기
+
+목록 CSV를 로컬에서 다시 만들 때:
+
+```bash
+# 서울 열린데이터광장 공동주택 API (SEOUL_DATA_API_KEY)
+python crawl_metadata.py
+```
+
+또는 앱 사이드바「새 데이터 생성」. 인증키는 https://data.seoul.go.kr , 데이터셋은 [OA-15818](https://data.seoul.go.kr/dataList/OA-15818/A/1/datasetView.do). API 한도는 [API_GUIDE.md](API_GUIDE.md).
+
+## 파일
 
 ```
 seoul_apt/
-├── app.py                 # Streamlit 메인 앱
-├── auth.py                # 실거래 트래커 로그인 (secrets + session_state)
-├── crawler.py             # 데이터 크롤링 모듈
-├── utils.py               # 유틸리티 함수들
-├── config.py              # 설정 파일
-├── subway_stations.py     # 지하철역 좌표 데이터
-├── requirements.txt       # 필요한 패키지 목록
-├── secrets.toml.example   # Secrets 설정 예시
-├── README.md              # 이 파일
-└── seoul_apartments.csv   # 크롤링된 데이터 (생성됨)
+├── app.py                      # Streamlit 엔트리. 로그인 게이트, 탭, 자동 수집
+├── auth.py                     # tracker_users 로그인
+├── molit_trades.py             # 국토부 실거래 수집·완료 구간
+├── sheets_store.py             # Google 시트 (구별 거래 + districts)
+├── seoul_time.py               # Asia/Seoul 시각
+├── trade_controls.py           # 기간 슬라이더·전용면적
+├── trade_compare.py            # 단지 비교
+├── trade_metadata.py           # 단지 정보 표
+├── market_cycles.py            # KB 지수 반기/연간 국면
+├── crawler.py / crawl_metadata.py / config.py / utils.py
+├── secrets.toml.example
+├── seoul_apartments_metadata.csv
+├── seoul_disrict_main_apt.csv
+├── data/seoul_market_monthly.json
+├── scripts/fetch_market_index.py
+└── tests/
 ```
-
-## 실제 데이터 크롤링
-
-### 서울 열린데이터광장 Open API 사용 (권장)
-
-1. **인증키 발급**:
-   - https://data.seoul.go.kr 접속
-   - 회원가입/로그인
-   - 마이페이지 > 인증키 관리에서 인증키 발급
-
-2. **인증키 설정**:
-   - `.env` 파일에 `SEOUL_DATA_API_KEY=your_api_key_here` 추가
-   - 또는 환경변수로 설정
-
-3. **크롤러 실행**:
-   ```bash
-   python crawler.py
-   ```
-
-4. **API 사용 제한**:
-   - 하루 최대 1,000회 요청 가능
-   - 1회에 최대 1,000건 요청 가능
-   - 제한 없이 사용하려면 활용사례(갤러리)에 등록
-
-자세한 내용은 [API_GUIDE.md](API_GUIDE.md)를 참고하세요.
-
-### 사용 가능한 데이터셋
-
-- **서울시 공동주택 아파트 정보 (OA-15818)**: 아파트 메타데이터 (아파트명, 주소, 준공일자, 세대수, 세대타입 등)
-- **서울시 부동산 실거래가 정보 (OA-21275)**: 실거래가 데이터
-
-### CSV 파일 다운로드
-
-서울 열린데이터광장에서 CSV 파일을 직접 다운로드하여 사용할 수도 있습니다:
-- [아파트 정보 데이터셋](https://data.seoul.go.kr/dataList/OA-15818/A/1/datasetView.do)
-- [부동산 실거래가 데이터셋](https://data.seoul.go.kr/dataList/OA-21275/S/1/datasetView.do)
-
-## 주의사항
-
-- 실제 웹사이트 크롤링 시 해당 사이트의 이용약관을 확인하세요
-- 크롤링 요청 간 적절한 지연 시간을 두세요 (현재 1초)
-- 공공데이터포털 API 사용 시 일일 호출 제한을 확인하세요
-
-## 향후 개선 사항
-
-- [ ] 실제 공공데이터포털 API 연동
-- [ ] 네이버/다음 부동산 크롤링 구현
-- [ ] 실거래가 정보 추가
-- [ ] 학교, 병원 등 주변 시설 정보 추가
-- [ ] 가격 정보 및 추세 분석
-- [ ] 즐겨찾기 기능
-- [ ] 비교 기능
 
 ## 라이선스
 
-이 프로젝트는 교육 및 개인 사용 목적으로 제작되었습니다.
-
-## 문의
-
-문제가 발생하거나 개선 사항이 있으면 이슈를 등록해주세요.
-
-
-
-실거래 수집은 성공적으로 받은 구·월 데이터를 교체하며, 같은 조건의 별개 거래를 삭제하지 않습니다.
-Google 시트의 `districts` 탭에 수집 시점, 최초/최종 거래일, 완료 연월, 자동업데이트 여부를 기록합니다.
-전체·3년·1년은 월 종료 후 완료된 기록이 있는 구·월을 생략하며, 6개월·3개월은 항상 갱신합니다.
-기존 이력에는 완료 기록이 없으므로 처음 한 번은 다시 수집합니다. 완료 안내 건수는 이번 조회에서 받은 건수입니다.
+교육 및 개인 사용 목적으로 제작되었습니다.
