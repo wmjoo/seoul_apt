@@ -33,6 +33,22 @@ def half_phase(date):
 DOWN_YEARS = frozenset(y for y in range(FIRST_YEAR, LAST_YEAR + 1) if market_phase(y) == "하락기")
 
 
+def phase_mark(value):
+    if value == "상승기":
+        return "(+)"
+    if value == "하락기":
+        return "(-)"
+    return value
+
+
+def phase_badge_colors(value):
+    if value == "상승기":
+        return "#fee2e2", "#9f1239"
+    if value == "하락기":
+        return "#dbeafe", "#1e40af"
+    return "#f4f5f7", "#586372"
+
+
 def shade_downturns(fig, start, end):
     start = pd.Timestamp(str(start)[:7] + "-01")
     end = pd.Timestamp(str(end)[:7] + "-01") + pd.offsets.MonthBegin(1)

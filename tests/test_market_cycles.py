@@ -26,6 +26,15 @@ class MarketTests(unittest.TestCase):
         self.assertEqual(result["조회된 거래 건수"].tolist(), [2, 0, 0, 1])
         self.assertEqual(result["서울 시장"].tolist(), ["하락기", "하락기", "상승기", "상승기"])
 
+    def test_phase_mark_and_badge_colors(self):
+        from market_cycles import phase_badge_colors, phase_mark
+
+        self.assertEqual(phase_mark("상승기"), "(+)")
+        self.assertEqual(phase_mark("하락기"), "(-)")
+        self.assertEqual(phase_mark("미분류"), "미분류")
+        self.assertEqual(phase_badge_colors("상승기")[0], "#fee2e2")
+        self.assertEqual(phase_badge_colors("하락기")[0], "#dbeafe")
+
 class ComparisonTests(unittest.TestCase):
     def test_annualized_counts_include_zero_months(self):
         from market_cycles import phase_comparison

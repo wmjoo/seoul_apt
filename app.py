@@ -1,6 +1,6 @@
 from trade_controls import period_control, period_presets, period_slider, date_bounds, area_values, grouped_chart_frame, area_label
 from trade_compare import render_trade_compare
-from market_cycles import DOWN_YEARS, half_phase, market_phase, shade_downturns, annual_activity, phase_comparison, HISTORY_SOURCE
+from market_cycles import half_phase, market_phase, phase_badge_colors, phase_mark, shade_downturns, annual_activity, phase_comparison, HISTORY_SOURCE
 from trade_metadata import complex_metadata
 import os
 import re
@@ -763,16 +763,21 @@ def render_trade_browse(apartment_df=None) -> None:
         st.caption("서울 아파트 시장 · 2006–2025 · 연간 매매가격지수 방향")
         badges = []
         for year in range(2006, 2026):
-            bg, color = ("#e5e7eb", "#374151") if year in DOWN_YEARS else ("#f4f5f7", "#586372")
+            phase = market_phase(year)
+            bg, color = phase_badge_colors(phase)
             badges.append(
                 f'<span style="padding:5px 8px;border-radius:5px;background:{bg};color:{color};'
-                f'font-size:12px;white-space:nowrap">{year} {market_phase(year)}</span>'
+                f'font-size:12px;white-space:nowrap">{year} {phase}</span>'
             )
         st.markdown('<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px">'
                     + "".join(badges) + '</div>', unsafe_allow_html=True)
         down_count = int(view_df["계약일"].map(half_phase).eq("하락기").sum())
         st.caption(f"현재 조건에서 하락기 거래 {down_count:,}건")
-        st.dataframe(annual_activity(view_df, ym_start, ym_end), hide_index=True, width="stretch")
+        activity = annual_activity(view_df, ym_start, ym_end)
+        for col in ["서울 시장", "상반기", "하반기"]:
+            if col in activity.columns:
+                activity[col] = activity[col].map(phase_mark)
+        st.dataframe(activity, hide_index=True, width="stretch")
         st.markdown("**상승기·하락기 연평균 거래 건수 비교**")
         st.dataframe(phase_comparison(view_df, ym_start, ym_end), hide_index=True, width="stretch")
         st.caption("연환산 평균 = 거래 건수 ÷ 선택 기간에 포함된 해당 국면의 개월 수 × 12. "
@@ -1005,11 +1010,12 @@ df, data_type, data_count = load_data()
 
 st.markdown("""
 <style>
-.block-container {padding-top:1.5rem; padding-bottom:2rem;}
+.block-container {padding-top:5rem; padding-bottom:2rem;}
 [data-testid="stVerticalBlock"] {gap:0.65rem;}
 h2 {font-size:1.3rem !important;} h3 {font-size:1.1rem !important;}
 [data-testid="stMetricValue"] {font-size:1.45rem;}
 button {border-radius:6px !important;}
+div[role="radiogroup"] {flex-wrap:wrap; row-gap:0.4rem;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -1190,7 +1196,10 @@ if selected_subway != "전체":
 
 
 MAIN_TABS = ["실거래가 조회", "단지 비교", "실거래가 크롤링", "목록", "지도", "통계", "설정"]
-view = st.radio("화면", MAIN_TABS, horizontal=True, key="main_view", label_visibility="collapsed")
+if hasattr(st, "pills"):
+    view = st.pills("화면", MAIN_TABS, default=MAIN_TABS[0], key="main_view_nav", label_visibility="collapsed")
+else:
+    view = st.radio("화면", MAIN_TABS, horizontal=True, key="main_view_nav", label_visibility="collapsed")
 if not view:
     view = MAIN_TABS[0]
 

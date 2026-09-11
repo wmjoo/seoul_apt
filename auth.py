@@ -101,10 +101,10 @@ def _default_login_id() -> str:
         return ""
 
 
-def render_tracker_login_panel(title="로그인", prefix="app") -> None:
+def render_tracker_login_panel(title=None, prefix="app") -> None:
     """앱 진입 전 로그인 폼을 그립니다."""
-    st.subheader(title)
-    st.caption("허용된 계정으로 로그인한 뒤 메뉴를 사용할 수 있습니다.")
+    if title:
+        st.subheader(title)
     users = get_tracker_users()
 
     if not users:
@@ -115,9 +115,9 @@ def render_tracker_login_panel(title="로그인", prefix="app") -> None:
     if id_key not in st.session_state:
         st.session_state[id_key] = _default_login_id()
     with st.form(f"{prefix}_login_form", clear_on_submit=False):
-        username = st.text_input("아이디", key=id_key)
-        password = st.text_input("비밀번호", type="password", key=f"{prefix}_login_pw")
-        if st.form_submit_button("로그인", use_container_width=True):
+        username = st.text_input("ID", key=id_key)
+        password = st.text_input("PW", type="password", key=f"{prefix}_login_pw")
+        if st.form_submit_button("LOG IN", use_container_width=True):
             if login_tracker(username, password):
                 st.rerun()
             else:
@@ -136,4 +136,4 @@ def render_app_login() -> None:
     )
     _, mid, _ = st.columns([1, 2.2, 1])
     with mid:
-        render_tracker_login_panel("서울 아파트 검색", "app")
+        render_tracker_login_panel(prefix="app")
