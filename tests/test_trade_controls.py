@@ -1,6 +1,6 @@
 import unittest
 import pandas as pd
-from trade_controls import recent_range, date_bounds, area_values, area_label, as_period_range
+from trade_controls import recent_range, date_bounds, area_values, area_label, as_period_range, is_collapsed_start, ensure_period_state
 
 
 class PeriodTests(unittest.TestCase):
@@ -14,6 +14,30 @@ class PeriodTests(unittest.TestCase):
         self.assertEqual(as_period_range(("2026-01", "2026-09")), ("2026-01", "2026-09"))
         self.assertEqual(as_period_range(["2026-09"]), ("2026-09", "2026-09"))
         self.assertEqual(as_period_range(("2026-09", "2026-01")), ("2026-01", "2026-09"))
+
+    def test_collapsed_first_month_is_restored_to_recent_10y(self):
+        options = pd.period_range("2006-01", "2026-09", freq="M").astype(str).tolist()
+        self.assertTrue(is_collapsed_start("2006-01", options))
+        self.assertTrue(is_collapsed_start(("2006-01", "2006-01"), options))
+        self.assertFalse(is_collapsed_start(("2006-01", "2026-09"), options))
+        self.assertFalse(is_collapsed_start(("2016-10", "2026-09"), options))
+        import trade_controls as controls
+        original = controls.st
+        try:
+            state = {}
+            controls.st = type("S", (), {"session_state": state})()
+            restored = ensure_period_state("compare_period_range", options, "2026-09-11")
+            self.assertEqual(restored, ("2016-10", "2026-09"))
+            state["compare_period_range"] = "2006-01"
+            restored = ensure_period_state("compare_period_range", options, "2026-09-11")
+            self.assertEqual(restored, ("2016-10", "2026-09"))
+            state["compare_period_range"] = ("2021-10", "2026-09")
+            self.assertEqual(
+                ensure_period_state("compare_period_range", options, "2026-09-11"),
+                ("2021-10", "2026-09"),
+            )
+        finally:
+            controls.st = original
 
     def test_today_cutoff_and_leap_month(self):
         self.assertEqual(date_bounds("2026-04", "2026-09", "2026-09-11")[1], pd.Timestamp("2026-09-11"))

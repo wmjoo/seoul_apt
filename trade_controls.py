@@ -39,12 +39,30 @@ def as_period_range(value):
     return text, text
 
 
+def is_collapsed_start(value, options):
+    """select_slider가 범위 대신 첫 달(2006-01) 하나만 남긴 상태인지."""
+    parsed = as_period_range(value)
+    if not parsed or not options:
+        return True
+    start, end = parsed
+    return start == end == str(options[0])
+
+
+def ensure_period_state(slider_key, options, now=None):
+    """위젯 키가 없거나 첫 달로 접혔으면 최근 10년으로 되돌린다."""
+    now = pd.Timestamp(now) if now is not None else today()
+    stored = as_period_range(st.session_state.get(slider_key))
+    if stored is None or is_collapsed_start(stored, options):
+        stored = recent_range(120, now)
+        st.session_state[slider_key] = stored
+    return stored
+
+
 def period_presets(key):
     now = today()
     options = pd.period_range("2006-01", now, freq="M").astype(str).tolist()
     slider_key = key + "_range"
-    current = as_period_range(st.session_state.get(slider_key)) or recent_range(120, now)
-    st.session_state[slider_key] = current
+    current = ensure_period_state(slider_key, options, now)
     presets = [("전체", None)] + PRESETS
     clicked = None
     for col, (label, months) in zip(st.columns(len(presets)), presets):
@@ -62,10 +80,11 @@ def period_slider(key, label="기간 (년월)"):
     now = today()
     options = pd.period_range("2006-01", now, freq="M").astype(str).tolist()
     slider_key = key + "_range"
-    current = as_period_range(st.session_state.get(slider_key)) or recent_range(120, now)
-    st.session_state[slider_key] = current
-    selected = st.select_slider(label, options=options, key=slider_key)
-    return as_period_range(selected) or current
+    current = ensure_period_state(slider_key, options, now)
+    selected = as_period_range(st.select_slider(label, options=options, key=slider_key)) or current
+    if is_collapsed_start(selected, options):
+        return current
+    return selected
 
 
 def period_control(key):
