@@ -32,6 +32,11 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(len(filter_comparison(frame, "2022-01", "2022-12")), 3)
         result = filter_comparison(frame, "2022-01", "2022-12", 84, True)
         self.assertEqual(result.index.tolist(), [3])
+        table = format_compare_table(filter_comparison(frame, "2022-01", "2022-12", 84, False).assign(
+            전용면적=lambda d: d["전용면적_num"], 층=lambda d: d["층_num"], 거래금액_만원=100000,
+        ))
+        self.assertTrue((pd.to_numeric(table["전용면적"]) >= 84).all())
+        self.assertTrue((pd.to_numeric(table["전용면적"]) < 85).all())
 
     def test_half_year_boundary_and_zero_counts(self):
         from trade_compare import half_year_activity
@@ -88,6 +93,30 @@ class CompareTests(unittest.TestCase):
         self.assertNotIn("1차", picks[1]["key"])
         self.assertIn("종암동", picks[0]["label"])
         self.assertIn("청량리동", picks[1]["label"])
+
+    def test_seed_compare_picks_does_not_need_trades(self):
+        from trade_compare import seed_compare_picks, apartment_options_for_gu, _frames_for_picked
+        apartments = pd.DataFrame([
+            {"아파트명": "종암에스케이", "자치구": "성북구", "동": "종암동", "세대수": 1318},
+            {"아파트명": "청량리한신", "자치구": "동대문구", "동": "청량리동", "세대수": 960},
+            {"아파트명": "청량리한신1차", "자치구": "동대문구", "동": "청량리동", "세대수": 610},
+        ])
+        picks = seed_compare_picks(apartments, ["성북구", "동대문구"])
+        self.assertEqual([item["gu"] for item in picks], ["성북구", "동대문구"])
+        self.assertTrue(all("key" not in item or not item.get("key") for item in picks))
+        self.assertIn("1,318세대", picks[0]["label"])
+        options, labels = apartment_options_for_gu(apartments, "동대문구")
+        self.assertTrue(any("청량리한신" in labels[k] and "1차" not in labels[k] for k in options))
+        trades = pd.DataFrame([
+            {"구": "성북구", "법정동": "종암동", "아파트명": "종암에스케이", "지번": "130"},
+            {"구": "동대문구", "법정동": "청량리동", "아파트명": "청량리한신", "지번": "60"},
+        ])
+        _, frames, resolved = _frames_for_picked(
+            picks, lambda force=False, districts=None: trades, lambda frame: frame, False,
+        )
+        self.assertEqual(len(frames), 2)
+        self.assertTrue(all(not df.empty for df in frames))
+        self.assertIn("종암에스케이", resolved[0]["key"])
 
     def test_overlay_chart_has_trace_per_complex(self):
         frames = [

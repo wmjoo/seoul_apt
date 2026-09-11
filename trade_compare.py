@@ -1,4 +1,6 @@
 """인증된 사용자의 단지별 거래 비교 화면."""
+from contextlib import nullcontext
+
 import pandas as pd
 import streamlit as st
 from trade_controls import period_control, date_bounds, area_values, grouped_chart_frame
@@ -117,6 +119,8 @@ def parse_area_choice(value):
 SESSION_KEY_COMPARE_PICKED = "compare_picked"
 SESSION_KEY_COMPARE_SHOW = "compare_show"
 SESSION_KEY_COMPARE_SEEDED = "compare_seeded"
+SESSION_KEY_COMPARE_BUSY = "compare_busy"
+SESSION_KEY_COMPARE_FORCE = "compare_force"
 COMPARE_MAX = 4
 DEFAULT_COMPARE_HINTS = (
     {"gu": "성북구", "tokens": ("성북구", "종암동", "종암에스케이")},
@@ -148,6 +152,91 @@ def _with_complex_key(frame):
     return result
 
 
+def pick_id(item):
+    if item.get("key"):
+        return str(item["key"])
+    tokens = tuple(item.get("tokens") or ())
+    return "|".join(tokens) if tokens else item.get("label", "")
+
+
+def _hint_label(apartments, hint):
+    gu, tokens = hint["gu"], hint["tokens"]
+    name = tokens[-1] if tokens else gu
+    dong = next((t for t in tokens if str(t).endswith("동")), "")
+    label = f"{name}({gu} {dong})".strip()
+    options, labels = apartment_options_for_gu(apartments, gu)
+    if not options:
+        return f"{label} [세대수 미상]" if "[" not in label else label
+    key = match_complex_key(options, tokens, hint.get("exclude", ()))
+    if key:
+        return labels.get(key, label)
+    return f"{label} [세대수 미상]"
+
+
+def seed_compare_picks(apartments=None, district_names=None, hints=DEFAULT_COMPARE_HINTS):
+    names = {str(x).strip() for x in (district_names or []) if str(x).strip()}
+    picks = []
+    for hint in hints:
+        if names and hint["gu"] not in names:
+            continue
+        picks.append({
+            "gu": hint["gu"],
+            "tokens": hint["tokens"],
+            "exclude": hint.get("exclude", ()),
+            "label": _hint_label(apartments, hint),
+        })
+    return picks
+
+
+def apartment_options_for_gu(apartments, gu):
+    if apartments is None or getattr(apartments, "empty", True):
+        return [], {}
+    gu_col = "자치구" if "자치구" in apartments.columns else ("구" if "구" in apartments.columns else None)
+    dong_col = "동" if "동" in apartments.columns else ("법정동" if "법정동" in apartments.columns else None)
+    if not gu_col or "아파트명" not in apartments.columns:
+        return [], {}
+    cols = ["아파트명", gu_col] + ([dong_col] if dong_col else [])
+    if "세대수" in apartments.columns:
+        cols.append("세대수")
+    work = apartments.loc[apartments[gu_col].astype(str).str.strip() == str(gu).strip(), cols].copy()
+    if work.empty:
+        return [], {}
+    work["아파트명"] = work["아파트명"].astype(str).str.strip()
+    work[gu_col] = work[gu_col].astype(str).str.strip()
+    if dong_col:
+        work[dong_col] = work[dong_col].astype(str).str.strip()
+    work = work.loc[work["아파트명"].ne("") & ~work["아파트명"].isin(["nan", "None", "<NA>"])]
+    parts = [work[gu_col], work[dong_col], work["아파트명"]] if dong_col else [work[gu_col], work["아파트명"]]
+    work = work.copy()
+    work["_key"] = parts[0]
+    for part in parts[1:]:
+        work["_key"] = work["_key"] + " | " + part
+    first = work.drop_duplicates("_key", keep="first")
+    labels = {}
+    for _, row in first.iterrows():
+        key = str(row["_key"])
+        name = str(row["아파트명"]).strip()
+        dong = str(row[dong_col]).strip() if dong_col else ""
+        count = pd.to_numeric(row.get("세대수"), errors="coerce") if "세대수" in first.columns else pd.NA
+        household = f"{int(count):,}세대" if pd.notna(count) and count > 0 else "세대수 미상"
+        labels[key] = f"{name}({gu} {dong}) [{household}]" if dong else f"{name}({gu}) [{household}]"
+    options = sorted(labels, key=lambda key: labels[key])
+    return options, labels
+
+
+def pick_from_option(gu, option_key, labels):
+    parts = [p.strip() for p in str(option_key).split("|")]
+    tokens = tuple(p for p in parts if p)
+    name = parts[-1] if parts else option_key
+    exclude = ("1차",) if "1차" not in name else ()
+    return {
+        "gu": gu,
+        "tokens": tokens,
+        "exclude": exclude,
+        "label": display_label(labels, option_key),
+    }
+
+
 def default_compare_picks(frame, apartments=None, hints=DEFAULT_COMPARE_HINTS):
     if frame is None or frame.empty:
         return []
@@ -166,12 +255,23 @@ def default_compare_picks(frame, apartments=None, hints=DEFAULT_COMPARE_HINTS):
         picks.append({
             "key": key,
             "gu": hint["gu"],
+            "tokens": hint["tokens"],
+            "exclude": hint.get("exclude", ()),
             "label": display_label(labels, key),
         })
     return picks
 
 
-def render_trade_compare(load_data, prepare, price_chart, volume_chart, apartments=None, district_names=None):
+def _announce(busy, message, status=None):
+    if not busy:
+        return
+    st.toast(message)
+    if status is not None:
+        status.update(label=message, state="running")
+        status.write(message)
+
+
+def render_trade_compare(load_data, prepare, volume_chart, apartments=None, district_names=None):
     names = [str(x).strip() for x in (district_names or []) if str(x).strip()]
     picked = st.session_state.setdefault(SESSION_KEY_COMPARE_PICKED, [])
     _, refresh_col = st.columns([8, 2])
@@ -181,30 +281,23 @@ def render_trade_compare(load_data, prepare, price_chart, volume_chart, apartmen
         return
     if not st.session_state.get(SESSION_KEY_COMPARE_SEEDED):
         if not picked:
-            seed_gus = [hint["gu"] for hint in DEFAULT_COMPARE_HINTS if hint["gu"] in names]
-            if seed_gus:
-                try:
-                    seed_frame = prepare(load_data(force=refresh, districts=seed_gus))
-                except Exception:
-                    seed_frame = pd.DataFrame()
-                picked.extend(default_compare_picks(seed_frame, apartments))
+            picked.extend(seed_compare_picks(apartments, names))
         st.session_state[SESSION_KEY_COMPARE_SEEDED] = True
+        st.session_state[SESSION_KEY_COMPARE_SHOW] = False
+    if refresh:
+        st.session_state[SESSION_KEY_COMPARE_SHOW] = False
+        st.session_state[SESSION_KEY_COMPARE_FORCE] = True
+        st.toast("최신 데이터를 다시 받습니다. 비교를 누르면 적용됩니다.")
+        st.caption("비교를 누르면 선택한 단지의 실거래를 다시 읽습니다.")
     default_gu = "성북구" if "성북구" in names else names[0]
     gcol, ccol, add_col = st.columns([2.0, 3.4, 0.8])
     with gcol:
         selected_gu = st.selectbox("구", names, index=names.index(default_gu), key="compare_gu")
-    try:
-        frame = prepare(load_data(force=refresh, districts=[selected_gu]))
-    except Exception:
-        st.error("실거래 저장소를 읽지 못했습니다. 잠시 후 다시 불러와 주세요.")
-        return
-    options, labels = [], {}
-    if not frame.empty:
-        frame = _with_complex_key(frame)
-        if not frame.empty:
-            labels = complex_labels(frame, apartments)
-            picked_keys = {item["key"] for item in picked}
-            options = [key for key in complex_options(frame, labels) if key not in picked_keys]
+    options, labels = apartment_options_for_gu(apartments, selected_gu)
+    picked_ids = {pick_id(item) for item in picked}
+    options = [key for key in options if pick_id(pick_from_option(selected_gu, key, labels)) not in picked_ids
+               and key not in picked_ids
+               and display_label(labels, key) not in {item.get("label") for item in picked}]
     with ccol:
         if options:
             preferred = match_complex_key(options, DEFAULT_COMPARE_HINTS[0]["tokens"]) or options[0]
@@ -217,18 +310,14 @@ def render_trade_compare(load_data, prepare, price_chart, volume_chart, apartmen
             )
         else:
             selected_apt = None
-            st.selectbox("단지", ["해당 구에 추가할 단지가 없습니다."], disabled=True, key=f"compare_apt_empty_{selected_gu}")
+            st.selectbox("단지", ["추가할 단지가 없습니다."], disabled=True, key=f"compare_apt_empty_{selected_gu}")
     with add_col:
         _align_button()
         if st.button("추가", width="stretch", disabled=not selected_apt or len(picked) >= COMPARE_MAX, key="compare_add"):
             if len(picked) >= COMPARE_MAX:
                 st.warning(f"단지는 최대 {COMPARE_MAX}개까지 비교할 수 있습니다.")
             elif selected_apt:
-                picked.append({
-                    "key": selected_apt,
-                    "gu": selected_gu,
-                    "label": display_label(labels, selected_apt),
-                })
+                picked.append(pick_from_option(selected_gu, selected_apt, labels))
                 st.session_state[SESSION_KEY_COMPARE_SHOW] = False
                 st.rerun()
 
@@ -237,6 +326,7 @@ def render_trade_compare(load_data, prepare, price_chart, volume_chart, apartmen
         if not picked:
             st.caption("단지를 추가한 뒤 비교를 누르세요.")
         else:
+            st.caption("비교를 눌러야 실거래를 읽고 차트를 그립니다.")
             for i, item in enumerate(list(picked)):
                 name_col, del_col = st.columns([10, 1])
                 with name_col:
@@ -250,36 +340,79 @@ def render_trade_compare(load_data, prepare, price_chart, volume_chart, apartmen
         _align_button()
         if st.button("비교", width="stretch", disabled=len(picked) < 2, key="compare_run"):
             st.session_state[SESSION_KEY_COMPARE_SHOW] = True
+            st.session_state[SESSION_KEY_COMPARE_BUSY] = True
             st.rerun()
 
     if not st.session_state.get(SESSION_KEY_COMPARE_SHOW) or len(picked) < 2:
         return
+    busy = bool(st.session_state.get(SESSION_KEY_COMPARE_BUSY))
+    gus = list(dict.fromkeys(item["gu"] for item in picked))
+    force = refresh or bool(st.session_state.get(SESSION_KEY_COMPARE_FORCE))
+    status = st.status("비교를 준비하는 중", expanded=True) if busy else None
+    _announce(busy, f"{'·'.join(gus)} 실거래를 불러오는 중", status)
     try:
-        combined, frames = _frames_for_picked(picked, load_data, prepare, refresh)
+        with st.spinner(f"{'·'.join(gus)} 실거래를 불러오는 중") if busy else nullcontext():
+            combined = _load_compare_frame(picked, load_data, prepare, force)
     except Exception:
+        if status is not None:
+            status.update(label="실거래를 읽지 못했습니다", state="error")
         st.error("비교할 실거래를 읽지 못했습니다. 잠시 후 다시 불러와 주세요.")
+        st.session_state[SESSION_KEY_COMPARE_BUSY] = False
         return
+    st.session_state[SESSION_KEY_COMPARE_FORCE] = False
+    _announce(busy, "선택한 단지를 찾는 중", status)
+    frames, resolved = _resolve_picked_frames(combined, picked)
+    picked[:] = resolved
     if combined.empty or any(df.empty for df in frames):
-        st.warning("추가한 단지의 거래를 찾지 못했습니다. 최신 데이터 불러오기 후 다시 비교하세요.")
+        missing = [item.get("label") or item.get("gu") for item, df in zip(resolved, frames) if df.empty]
+        if status is not None:
+            status.update(label="단지 거래를 찾지 못했습니다", state="error")
+        st.warning("추가한 단지의 거래를 찾지 못했습니다: " + ", ".join(missing))
+        st.session_state[SESSION_KEY_COMPARE_BUSY] = False
         return
-    _render_compare_results(picked, frames, combined, price_chart, volume_chart)
+    _announce(busy, "기간·면적을 적용하는 중", status)
+    _render_compare_results(resolved, frames, combined, volume_chart, busy=busy, status=status)
+    if status is not None:
+        status.update(label="비교 완료", state="complete", expanded=False)
+    if busy:
+        st.toast("비교 완료")
+        st.session_state[SESSION_KEY_COMPARE_BUSY] = False
+
+
+def _load_compare_frame(picked, load_data, prepare, force):
+    gus = list(dict.fromkeys(item["gu"] for item in picked))
+    frame = prepare(load_data(force=force, districts=gus))
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    return _with_complex_key(frame)
+
+
+def _resolve_picked_frames(frame, picked):
+    if frame is None or frame.empty or "_complex" not in frame.columns:
+        return [pd.DataFrame() for _ in picked], list(picked)
+    options = frame["_complex"].dropna().astype(str).unique().tolist()
+    known = set(options)
+    frames = []
+    resolved = []
+    for item in picked:
+        key = item.get("key") if item.get("key") in known else None
+        if not key:
+            key = match_complex_key(options, item.get("tokens") or (), item.get("exclude") or ())
+        part = frame.loc[frame["_complex"] == key].copy() if key else frame.iloc[0:0].copy()
+        frames.append(part)
+        resolved.append({**item, "key": key})
+    return frames, resolved
 
 
 def _frames_for_picked(picked, load_data, prepare, force):
-    gus = list(dict.fromkeys(item["gu"] for item in picked))
-    frame = prepare(load_data(force=force, districts=gus))
-    if frame.empty:
-        return frame, []
-    frame = _with_complex_key(frame)
-    if frame.empty:
-        return pd.DataFrame(), []
-    frames = [frame.loc[frame["_complex"] == item["key"]].copy() for item in picked]
-    return frame, frames
+    frame = _load_compare_frame(picked, load_data, prepare, force)
+    frames, resolved = _resolve_picked_frames(frame, picked)
+    return frame, frames, resolved
 
 
-def _render_compare_results(picked, frames, combined, price_chart, volume_chart):
-    selected = [item["key"] for item in picked]
-    labels = {item["key"]: item["label"] for item in picked}
+def _render_compare_results(picked, frames, combined, volume_chart, busy=False, status=None):
+    selected = [item.get("key") for item in picked]
+    labels = {item["key"]: item["label"] for item in picked if item.get("key")}
     valid_dates = combined["계약일"].dropna() if "계약일" in combined.columns else pd.Series(dtype="datetime64[ns]")
     if valid_dates.empty:
         st.info("비교할 거래 날짜가 없습니다.")
@@ -287,63 +420,58 @@ def _render_compare_results(picked, frames, combined, price_chart, volume_chart)
     start, end = period_control("compare_period")
     area_col, floor_col = st.columns([3, 1])
     shared = common_areas(frames)
-    area_options = area_choices(shared)
-    if st.session_state.get("compare_area") not in area_options:
-        st.session_state.pop("compare_area", None)
-    area = parse_area_choice(area_col.selectbox(
-        "공통 전용면적 (개별 차트·건수)", area_options,
-        format_func=lambda x: x if x == "전체" else f"{x}㎡",
-        key="compare_area",
-    ))
+    area_options = [str(int(value)) for value in shared]
+    if area_options:
+        overlay_default = preferred_overlay_area(frames, shared)
+        default_area = str(int(overlay_default)) if overlay_default is not None else area_options[0]
+        if st.session_state.get("compare_area") not in area_options:
+            st.session_state.pop("compare_area", None)
+        area = parse_area_choice(area_col.selectbox(
+            "전용면적",
+            area_options,
+            index=area_options.index(default_area) if default_area in area_options else 0,
+            format_func=lambda x: f"{x}㎡",
+            key="compare_area",
+        ))
+    else:
+        area = "전체"
+        area_col.selectbox("전용면적", ["공통 면적 없음"], disabled=True, key="compare_area_empty")
     exclude = floor_col.checkbox("1층 제외", key="compare_exclude_first")
-    st.caption("소수점을 버린 정수 면적(59·84·114㎡)으로 묶어 공통 면적을 비교합니다. 전체는 각 단지의 모든 면적을 포함합니다.")
+    st.caption("소수점을 버린 정수 면적(59·84·114㎡)으로 묶어 비교합니다. 기간·면적·1층 제외는 아래 차트와 표에 같이 적용됩니다.")
     if not shared:
         st.caption("공통 전용면적이 없어 전체 면적으로 비교합니다.")
     views = [filter_comparison(df, start, end, area, exclude) for df in frames]
     named = [display_label(labels, x) for x in selected]
+    _announce(busy, "반기별 건수 표를 만드는 중", status)
     st.markdown("**반기별 거래 건수**")
     st.dataframe(half_year_activity(views, named, start, end),
                  hide_index=True, use_container_width=True)
     st.caption("현재 필터와 저장된 거래 기준입니다. 0건에는 미수집 기간이 포함될 수 있습니다.")
     st.markdown("**단지별 매매 실거래가 비교**")
     if shared:
-        overlay_options = [str(int(value)) for value in shared]
-        overlay_default = preferred_overlay_area(frames, shared)
-        overlay_index = overlay_options.index(str(int(overlay_default))) if overlay_default is not None and str(int(overlay_default)) in overlay_options else 0
-        if st.session_state.get("compare_overlay_area") not in overlay_options:
-            st.session_state.pop("compare_overlay_area", None)
-        overlay_area = parse_area_choice(st.selectbox(
-            "통합 비교 차트 전용면적 (㎡)", overlay_options, index=overlay_index,
-            format_func=lambda x: f"{x}㎡",
-            key="compare_overlay_area",
-        ))
-        overlay_views = [filter_comparison(df, start, end, overlay_area, exclude) for df in frames]
-        st.plotly_chart(build_overlay(overlay_views, named, start, end, overlay_area),
+        _announce(busy, "실거래가 차트를 그리는 중", status)
+        st.plotly_chart(build_overlay(views, named, start, end, area),
                         use_container_width=True, key="compare_overlay",
                         config={"displaylogo": False, "scrollZoom": True})
-        st.plotly_chart(build_overlay_volume(overlay_views, named, start, end, overlay_area),
+        _announce(busy, "월별 건수 차트를 그리는 중", status)
+        st.plotly_chart(build_overlay_volume(views, named, start, end, area),
                         use_container_width=True, key="compare_overlay_volume",
                         config={"displaylogo": False, "scrollZoom": True})
-        st.caption("통합 차트는 위 전용면적만 적용합니다. 위: 단지별 이동 중앙값·실거래 · 아래: 월별 거래 건수 · 색·모양은 단지별로 같습니다.")
+        st.caption("선·점은 단지별 실거래와 이동 중앙값, 아래는 같은 면적의 월별 거래 건수입니다. 색·모양은 단지별로 같습니다.")
     else:
         st.info("공통 정수 면적이 없어 동일 면적 통합 차트를 표시할 수 없습니다.")
-    palette = sorted(area_values(combined, True).dropna().unique())
-    prices = pd.concat(views)["거래금액_만원"].dropna() / 10000
+    _announce(busy, "단지별 거래 표를 만드는 중", status)
+    filtered = pd.concat(views) if views else combined
+    palette = sorted(area_values(filtered, True).dropna().unique()) if not filtered.empty else []
     counts = [int(df.groupby("계약년월").size().max()) if not df.empty else 0 for df in views]
     columns = st.columns(len(selected))
     for i, (col, label, df) in enumerate(zip(columns, selected, views)):
         with col:
             st.markdown(f"**{display_label(labels, label)}**")
             st.caption(f"{start} ~ {end} · {len(df):,}건")
-            fig = price_chart(df, "매매 실거래가", start, end)
-            if not prices.empty:
-                padding = max((prices.max() - prices.min()) * .08, .1)
-                fig.update_yaxes(range=[max(0, prices.min()-padding), prices.max()+padding])
-            st.plotly_chart(fig, use_container_width=True, key=f"compare_price_{i}", config={"displaylogo": False})
             volume = volume_chart(grouped_chart_frame(df), start, end, palette)
             volume.update_yaxes(range=[0, max(1, max(counts)) * 1.2])
             st.plotly_chart(volume, use_container_width=True, key=f"compare_volume_{i}", config={"displaylogo": False})
-            st.caption("추세선: 이동 중앙값 · 파란 음영: 이동 20~80% 분위 구간")
             table = format_compare_table(df)
             st.dataframe(table, hide_index=True, use_container_width=True, height=360)
             st.download_button("원본 내역 CSV", table.to_csv(index=False).encode("utf-8-sig"),

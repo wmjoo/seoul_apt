@@ -1253,7 +1253,6 @@ elif view == "단지 비교":
     render_trade_compare(
         get_cached_trades,
         _prepare_browse_trades,
-        _build_trade_chart,
         _build_volume_chart,
         df,
         district_names=district_names_from_meta(),
