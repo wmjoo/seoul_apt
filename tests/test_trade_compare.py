@@ -5,11 +5,16 @@ from trade_compare import (
     filter_comparison,
     preferred_overlay_area,
     overlay_colors,
+    overlay_style,
     build_overlay,
+    build_overlay_volume,
     display_label,
     complex_options,
     area_choices,
     parse_area_choice,
+    format_compare_table,
+    monthly_trade_counts,
+    COMPARE_TABLE_COLS,
 )
 
 
@@ -99,3 +104,38 @@ class CompareTests(unittest.TestCase):
         self.assertGreaterEqual(names.count(labels[0]), 1)
         self.assertGreaterEqual(names.count(labels[1]), 1)
         self.assertIn("84㎡", fig.layout.title.text)
+
+    def test_compare_table_keeps_only_requested_columns(self):
+        frame = pd.DataFrame({
+            "계약일": pd.to_datetime(["2024-01-02", "2024-03-15"]),
+            "구": ["성북구", "성북구"],
+            "아파트명": ["종암에스케이", "종암에스케이"],
+            "전용면적": [84.72, 59.9],
+            "평": [25.6, 18.1],
+            "층": [8, 3],
+            "거래금액_만원": [125000, 98000],
+            "거래유형": ["중개거래", "중개거래"],
+        })
+        table = format_compare_table(frame)
+        self.assertEqual(list(table.columns), COMPARE_TABLE_COLS)
+        self.assertEqual(table["계약일"].tolist(), ["2024-03-15", "2024-01-02"])
+        self.assertEqual(table["거래가격"].tolist(), ["9억 8,000", "12억 5,000"])
+        self.assertEqual(table["층"].tolist(), ["3", "8"])
+
+    def test_overlay_volume_matches_price_colors_and_symbols(self):
+        frames = [
+            pd.DataFrame({"계약일": pd.to_datetime(["2024-01-05", "2024-01-20", "2024-03-01"])}),
+            pd.DataFrame({"계약일": pd.to_datetime(["2024-02-01"])}),
+        ]
+        labels = ["A단지", "B단지"]
+        counts = monthly_trade_counts(frames[0], "2024-01", "2024-03")
+        self.assertEqual(counts.tolist(), [2, 0, 1])
+        fig = build_overlay_volume(frames, labels, "2024-01", "2024-03", 84)
+        self.assertEqual(len(fig.data), 2)
+        self.assertIn("건수", fig.layout.title.text)
+        for index, trace in enumerate(fig.data):
+            color, symbol = overlay_style(index, 2)
+            self.assertEqual(trace.marker.color, color)
+            self.assertEqual(trace.line.color, color)
+            self.assertEqual(trace.marker.symbol, symbol)
+            self.assertEqual(trace.mode, "lines+markers")

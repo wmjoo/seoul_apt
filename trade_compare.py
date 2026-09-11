@@ -19,6 +19,10 @@ def preferred_overlay_area(frames, shared):
     return int(ranked.index[0]) if len(ranked) else int(shared[0])
 
 
+OVERLAY_SYMBOLS = ["circle", "diamond", "square", "x", "triangle-up"]
+COMPARE_TABLE_COLS = ["전용면적", "평", "층", "거래가격", "계약일"]
+
+
 def overlay_colors(count):
     palettes = {
         1: ["#2563EB"],
@@ -28,6 +32,51 @@ def overlay_colors(count):
     }
     fallback = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9"]
     return palettes.get(count, fallback[:count])
+
+
+def overlay_style(index, count):
+    colors = overlay_colors(count)
+    return colors[index % len(colors)], OVERLAY_SYMBOLS[index % len(OVERLAY_SYMBOLS)]
+
+
+def _format_trade_price(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    try:
+        manwon = int(round(float(value)))
+    except (TypeError, ValueError):
+        return ""
+    eok, rest = divmod(manwon, 10000)
+    if eok and rest:
+        return f"{eok}억 {rest:,}"
+    if eok:
+        return f"{eok}억"
+    return f"{rest:,}만원"
+
+
+def format_compare_table(frame):
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=COMPARE_TABLE_COLS)
+    work = frame.copy()
+    if "전용면적" not in work.columns and "전용면적_num" in work.columns:
+        work["전용면적"] = work["전용면적_num"]
+    if "층" not in work.columns and "층_num" in work.columns:
+        work["층"] = work["층_num"]
+    if "평" not in work.columns:
+        area = pd.to_numeric(work["전용면적"] if "전용면적" in work.columns else work.get("전용면적_num"), errors="coerce")
+        work["평"] = (area / 3.3058).round(1)
+    if "거래가격" not in work.columns:
+        price = work["거래금액_만원"] if "거래금액_만원" in work.columns else work.get("거래금액")
+        work["거래가격"] = pd.to_numeric(price, errors="coerce").map(_format_trade_price)
+    work["계약일"] = pd.to_datetime(work.get("계약일"), errors="coerce").dt.strftime("%Y-%m-%d")
+    if "전용면적" in work.columns:
+        area = pd.to_numeric(work["전용면적"], errors="coerce")
+        work["전용면적"] = area.map(lambda x: "" if pd.isna(x) else (f"{x:.0f}" if float(x).is_integer() else f"{float(x):.2f}"))
+    if "층" in work.columns:
+        floor = pd.to_numeric(work["층"], errors="coerce")
+        work["층"] = floor.map(lambda x: "" if pd.isna(x) else str(int(x)))
+    cols = [c for c in COMPARE_TABLE_COLS if c in work.columns]
+    return work.sort_values("계약일", ascending=False, na_position="last")[cols].reset_index(drop=True)
 
 
 def filter_comparison(frame, start, end, area="전체", exclude_first=False):
@@ -235,15 +284,16 @@ def _render_compare_results(picked, frames, combined, price_chart, volume_chart)
     if valid_dates.empty:
         st.info("비교할 거래 날짜가 없습니다.")
         return
-    signature = "__".join(selected)
-    start, end = period_control(f"compare_period_{signature}")
+    start, end = period_control("compare_period")
     area_col, floor_col = st.columns([3, 1])
     shared = common_areas(frames)
     area_options = area_choices(shared)
+    if st.session_state.get("compare_area") not in area_options:
+        st.session_state.pop("compare_area", None)
     area = parse_area_choice(area_col.selectbox(
         "공통 전용면적 (개별 차트·건수)", area_options,
         format_func=lambda x: x if x == "전체" else f"{x}㎡",
-        key=f"compare_area_{signature}_{'_'.join(area_options)}",
+        key="compare_area",
     ))
     exclude = floor_col.checkbox("1층 제외", key="compare_exclude_first")
     st.caption("소수점을 버린 정수 면적(59·84·114㎡)으로 묶어 공통 면적을 비교합니다. 전체는 각 단지의 모든 면적을 포함합니다.")
@@ -260,16 +310,21 @@ def _render_compare_results(picked, frames, combined, price_chart, volume_chart)
         overlay_options = [str(int(value)) for value in shared]
         overlay_default = preferred_overlay_area(frames, shared)
         overlay_index = overlay_options.index(str(int(overlay_default))) if overlay_default is not None and str(int(overlay_default)) in overlay_options else 0
+        if st.session_state.get("compare_overlay_area") not in overlay_options:
+            st.session_state.pop("compare_overlay_area", None)
         overlay_area = parse_area_choice(st.selectbox(
             "통합 비교 차트 전용면적 (㎡)", overlay_options, index=overlay_index,
             format_func=lambda x: f"{x}㎡",
-            key=f"overlay_area_{signature}_{'_'.join(overlay_options)}",
+            key="compare_overlay_area",
         ))
         overlay_views = [filter_comparison(df, start, end, overlay_area, exclude) for df in frames]
         st.plotly_chart(build_overlay(overlay_views, named, start, end, overlay_area),
                         use_container_width=True, key="compare_overlay",
                         config={"displaylogo": False, "scrollZoom": True})
-        st.caption("통합 차트는 위 전용면적만 적용합니다. 선: 단지별 이동 중앙값 · 점: 실제 거래 · 회색 배경: 서울 시장 반기 하락기")
+        st.plotly_chart(build_overlay_volume(overlay_views, named, start, end, overlay_area),
+                        use_container_width=True, key="compare_overlay_volume",
+                        config={"displaylogo": False, "scrollZoom": True})
+        st.caption("통합 차트는 위 전용면적만 적용합니다. 위: 단지별 이동 중앙값·실거래 · 아래: 월별 거래 건수 · 색·모양은 단지별로 같습니다.")
     else:
         st.info("공통 정수 면적이 없어 동일 면적 통합 차트를 표시할 수 없습니다.")
     palette = sorted(area_values(combined, True).dropna().unique())
@@ -289,9 +344,9 @@ def _render_compare_results(picked, frames, combined, price_chart, volume_chart)
             volume.update_yaxes(range=[0, max(1, max(counts)) * 1.2])
             st.plotly_chart(volume, use_container_width=True, key=f"compare_volume_{i}", config={"displaylogo": False})
             st.caption("추세선: 이동 중앙값 · 파란 음영: 이동 20~80% 분위 구간")
-            raw = df.sort_values("계약일", ascending=False).drop(columns=["_complex", "전용면적_num", "층_num", "계약년월"], errors="ignore")
-            st.dataframe(raw, hide_index=True, use_container_width=True, height=360)
-            st.download_button("원본 내역 CSV", raw.to_csv(index=False).encode("utf-8-sig"),
+            table = format_compare_table(df)
+            st.dataframe(table, hide_index=True, use_container_width=True, height=360)
+            st.download_button("원본 내역 CSV", table.to_csv(index=False).encode("utf-8-sig"),
                                file_name=f"comparison_{i+1}.csv", mime="text/csv", key=f"compare_csv_{i}")
 
 
@@ -343,15 +398,31 @@ def half_year_activity(frames, labels, start, end):
     return result
 
 
+def _overlay_axis(start, end):
+    left, right = date_bounds(start, end)
+    months = (right.year - left.year) * 12 + (right.month - left.month) + 1
+    dtick = "M12" if months > 132 else ("M6" if months >= 120 else "M3")
+    return left, right, dtick
+
+
+def monthly_trade_counts(frame, start, end):
+    months = pd.period_range(start, end, freq="M")
+    empty = pd.Series(0, index=months, dtype=int)
+    if frame is None or frame.empty or "계약일" not in frame.columns:
+        return empty
+    dates = pd.to_datetime(frame["계약일"], errors="coerce").dropna()
+    if dates.empty:
+        return empty
+    counts = dates.dt.to_period("M").value_counts()
+    return pd.Series([int(counts.get(month, 0)) for month in months], index=months, dtype=int)
+
+
 def build_overlay(frames, labels, start, end, area=None):
     import plotly.graph_objects as go
-    colors = overlay_colors(len(frames))
-    symbols = ["circle", "diamond", "square", "x", "triangle-up"]
     fig = go.Figure()
     for index, (frame, label) in enumerate(zip(frames, labels)):
         df = frame.dropna(subset=["계약일", "거래금액_만원"]).sort_values("계약일")
-        color = colors[index % len(colors)]
-        symbol = symbols[index % len(symbols)]
+        color, symbol = overlay_style(index, len(frames))
         if df.empty:
             fig.add_trace(go.Scatter(x=[], y=[], mode="markers", name=label, legendgroup=label,
                                     marker=dict(color=color, size=8, symbol=symbol)))
@@ -366,9 +437,7 @@ def build_overlay(frames, labels, start, end, area=None):
             median = prices.rolling(window, center=True, min_periods=1).median()
             fig.add_trace(go.Scatter(x=df["계약일"], y=median, mode="lines", name=label,
                                     legendgroup=label, showlegend=False, line=dict(color=color, width=2.6)))
-    left, right = date_bounds(start, end)
-    months = (right.year - left.year) * 12 + (right.month - left.month) + 1
-    dtick = "M12" if months > 132 else ("M6" if months >= 120 else "M3")
+    left, right, dtick = _overlay_axis(start, end)
     title = f"{int(area)}㎡ 매매 실거래가 비교" if area is not None else "매매 실거래가 비교"
     fig.update_layout(title=dict(text=title, font=dict(size=16)), height=430,
                       margin=dict(l=45, r=15, t=80, b=35),
@@ -377,4 +446,35 @@ def build_overlay(frames, labels, start, end, area=None):
                       xaxis=dict(range=[left, right + pd.Timedelta(days=1)], tickformat="%y.%m",
                                  dtick=dtick, gridcolor="#eeeeee"),
                       yaxis=dict(ticksuffix="억", gridcolor="#eeeeee", zeroline=False))
+    return shade_downturns(fig, start, end)
+
+
+def build_overlay_volume(frames, labels, start, end, area=None):
+    import plotly.graph_objects as go
+    fig = go.Figure()
+    ymax = 1
+    for index, (frame, label) in enumerate(zip(frames, labels)):
+        color, symbol = overlay_style(index, len(frames))
+        counts = monthly_trade_counts(frame, start, end)
+        ymax = max(ymax, int(counts.max()) if len(counts) else 0)
+        fig.add_trace(go.Scatter(
+            x=counts.index.to_timestamp(),
+            y=counts.values,
+            mode="lines+markers",
+            name=label,
+            legendgroup=label,
+            line=dict(color=color, width=2.4),
+            marker=dict(color=color, size=9, symbol=symbol),
+            hovertemplate="%{x|%Y-%m}<br>%{y}건<extra>%{fullData.name}</extra>",
+        ))
+    left, right, dtick = _overlay_axis(start, end)
+    title = f"{int(area)}㎡ 월별 거래 건수 비교" if area is not None else "월별 거래 건수 비교"
+    fig.update_layout(title=dict(text=title, font=dict(size=16)), height=320,
+                      margin=dict(l=45, r=15, t=72, b=35),
+                      paper_bgcolor="white", plot_bgcolor="white", hovermode="x unified",
+                      legend=dict(orientation="h", x=1, xanchor="right", y=1.02, yanchor="bottom", font=dict(size=11)),
+                      xaxis=dict(range=[left, right + pd.Timedelta(days=1)], tickformat="%y.%m",
+                                 dtick=dtick, gridcolor="#eeeeee"),
+                      yaxis=dict(title="건수", rangemode="tozero", gridcolor="#eeeeee", zeroline=False,
+                                 range=[0, ymax * 1.22]))
     return shade_downturns(fig, start, end)
